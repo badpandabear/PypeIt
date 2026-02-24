@@ -39,7 +39,9 @@ The Binospec IFU is a fiber-fed integral field unit with a hexagonal
 lenslet array feeding approximately 360 fibers per side into the
 spectrograph.  Each side has 40 dedicated sky fibers located at the
 outermost ring of each hexagonal sub-bundle, which are used for sky
-subtraction.
+subtraction.  See the `Binospec IFU instrument page
+<https://www.mmto.org/instrument-suite/binospec/binospec-ifu-information/>`__
+for more details on the hardware and observing modes.
 
 IFU data are identified automatically from the FITS header keyword
 ``MASK = 'IFU'`` and reduced using the ``mmt_binospec_ifu`` spectrograph
