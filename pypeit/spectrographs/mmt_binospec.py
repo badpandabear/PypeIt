@@ -10,6 +10,8 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy import units
+from astropy.time import Time
+from astropy import wcs
 from IPython import embed
 import matplotlib.pyplot as plt
 from matplotlib import patches
@@ -1097,4 +1099,526 @@ def binospec_read_amp(inp, ext):
     overscan = np.zeros_like(temp[xos1:xos2, yos1:yos2]) # Give a zero fake overscan at the edge of each amplifiers
 
     return data, overscan, datasec, biassec
+
+
+class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
+    """
+    Child to handle MMT/BINOSPEC IFU specific code.
+
+    The Binospec IFU is a fiber-fed integral field unit with a hexagonal
+    lenslet array feeding ~360 fibers per side into the spectrograph.
+    Each side has 40 dedicated sky fibers at the outermost ring of each
+    sub-bundle (indices [0-7, 88-95, 176-183, 264-271, 352-359]).
+    """
+    name = 'mmt_binospec_ifu'
+    pypeline = 'SlicerIFU'
+    supported = True
+
+    # IFU fiber geometry constants
+    # On-sky fiber pitch in arcsec (hexagonal lenslet array)
+    ifu_fiber_pitch = 0.6
+    # Number of fibers per side
+    nfibers_a = 360
+    nfibers_b = 356
+    # Dedicated sky fiber indices (0-based array positions, per side,
+    # outermost ring of each sub-bundle). The IDL pipeline uses these
+    # indices for sky subtraction. When matching against FIB_ID in the
+    # reference profile (which is 1-based), add 1.
+    sky_fiber_indices_0based = np.array([
+        *range(0, 8), *range(88, 96), *range(176, 184),
+        *range(264, 272), *range(352, 360)
+    ])
+    # 1-based fiber IDs for matching against reference profile FIB_ID
+    sky_fiber_ids = sky_fiber_indices_0based + 1
+
+    def configuration_keys(self):
+        """
+        Return the metadata keys that define a unique instrument
+        configuration.
+
+        Adds 'decker' to the parent keys so that IFU frames are not
+        grouped with MOS frames in the same configuration.
+
+        Returns:
+            :obj:`list`: List of configuration keys.
+        """
+        return super().configuration_keys() + ['decker']
+
+    def init_meta(self):
+        """
+        Define how metadata are derived from the spectrograph files.
+
+        Extends the parent class metadata with IFU-specific fields
+        required by the SlicerIFU pipeline (atmospheric parameters
+        for DAR correction).
+        """
+        super().init_meta()
+        # IFU-specific metadata for SlicerIFU pipeline
+        self.meta['slitwid'] = dict(card=None, compound=True)
+        self.meta['obstime'] = dict(card=None, compound=True, required=False)
+        self.meta['pressure'] = dict(card=None, compound=True, required=False)
+        self.meta['temperature'] = dict(card=None, compound=True, required=False)
+        self.meta['humidity'] = dict(card=None, compound=True, required=False)
+        self.meta['parangle'] = dict(card=None, compound=True, required=False)
+
+    def compound_meta(self, headarr, meta_key):
+        """
+        Methods to generate metadata requiring interpretation of the header
+        data, instead of simply reading the value of a header card.
+
+        Args:
+            headarr (:obj:`list`):
+                List of `astropy.io.fits.Header`_ objects.
+            meta_key (:obj:`str`):
+                Metadata keyword to construct.
+
+        Returns:
+            object: Metadata value read from the header(s).
+        """
+        if meta_key == 'slitwid':
+            # IFU fiber pitch on sky, converted to degrees for WCS
+            return self.ifu_fiber_pitch / 3600.0
+        elif meta_key == 'obstime':
+            try:
+                return Time(headarr[1]['DATE-OBS'])
+            except KeyError:
+                log.warning("Time of observation not in header")
+                return None
+        elif meta_key == 'pressure':
+            # MMT at ~2600m elevation, typical pressure ~730 mbar
+            try:
+                return headarr[1]['PRESSURE']
+            except KeyError:
+                log.warning("Pressure not in header - using default for MMT "
+                            "elevation (730 mbar)")
+                return 730.0
+        elif meta_key == 'temperature':
+            try:
+                return headarr[1]['TEMPERAT']
+            except KeyError:
+                log.warning("Temperature not in header - using default (5 deg C)")
+                return 5.0
+        elif meta_key == 'humidity':
+            try:
+                return headarr[1]['HUMIDITY']
+            except KeyError:
+                log.warning("Humidity not in header - using default (20%%)")
+                return 20.0
+        elif meta_key == 'parangle':
+            try:
+                return headarr[1]['PARANGLE'] * np.pi / 180.0
+            except KeyError:
+                log.warning("Parallactic angle not in header - using default (0)")
+                return 0.0
+        else:
+            return super().compound_meta(headarr, meta_key)
+
+    def check_frame_type(self, ftype, fitstbl, exprng=None):
+        """
+        Check for frames of the provided type.
+
+        Overrides the parent to ensure only IFU frames (MASK == 'IFU')
+        are selected for this spectrograph.
+
+        Args:
+            ftype (:obj:`str`):
+                Type of frame to check.
+            fitstbl (`astropy.table.Table`_):
+                The table with the metadata for one or more frames to check.
+            exprng (:obj:`list`, optional):
+                Range in the allowed exposure time for a frame of type ``ftype``.
+
+        Returns:
+            `numpy.ndarray`_: Boolean array with the flags selecting the
+            exposures in ``fitstbl`` that are ``ftype`` type frames.
+        """
+        # Use parent frame typing logic, then restrict to IFU frames only
+        is_type = super().check_frame_type(ftype, fitstbl, exprng=exprng)
+        is_ifu = np.array([d.strip().upper() == 'IFU' for d in fitstbl['decker']])
+        return is_type & is_ifu
+
+    @classmethod
+    def default_pypeit_par(cls):
+        """
+        Return the default parameters to use for this instrument.
+
+        Returns:
+            :class:`~pypeit.par.pypeitpar.PypeItPar`: Parameters required by
+            all of PypeIt methods.
+        """
+        par = super().default_pypeit_par()
+
+        # IFU science frame processing
+        par['scienceframe']['process']['sigclip'] = 4.0
+        par['scienceframe']['process']['objlim'] = 1.5
+        par['scienceframe']['process']['use_illumflat'] = False
+        par['scienceframe']['process']['use_specillum'] = False
+        par['scienceframe']['process']['spat_flexure_correct'] = False
+        par['scienceframe']['process']['use_biasimage'] = False
+        par['scienceframe']['process']['use_darkimage'] = False
+
+        # Skip 1D extraction for IFU data - extraction before DAR correction
+        # is meaningless
+        par['reduce']['extraction']['skip_extraction'] = True
+
+        # NOTE: Binospec IFU is fiber-fed, not slicer-based. Ideally
+        # slit_spec=False, but that code path is not yet implemented in
+        # PypeIt's coadd3d. Using slit_spec=True for now to leverage the
+        # existing SlicerIFU infrastructure (treating each fiber as a
+        # narrow slit). Future work should implement the fiber-based path.
+        par['reduce']['cube']['slit_spec'] = True
+        par['reduce']['cube']['combine'] = False
+
+        # Sky subtraction: use joint fit across all fibers
+        par['reduce']['skysub']['no_poly'] = True
+        par['reduce']['skysub']['joint_fit'] = True
+
+        # Slit edge parameters tuned for densely-packed fibers
+        par['calibrations']['slitedges']['edge_thresh'] = 5.
+        par['calibrations']['slitedges']['minimum_slit_gap'] = 0.
+        par['calibrations']['slitedges']['minimum_slit_length'] = 2.
+        par['calibrations']['slitedges']['pad'] = 0
+        par['calibrations']['slitedges']['use_maskdesign'] = False
+
+        # Flat field: tweak edges for IFU fibers
+        par['calibrations']['flatfield']['tweak_slits'] = True
+        par['calibrations']['flatfield']['tweak_method'] = 'gradient'
+        par['calibrations']['flatfield']['tweak_slits_thresh'] = 0.0
+        par['calibrations']['flatfield']['tweak_slits_maxfrac'] = 0.0
+        par['calibrations']['flatfield']['slit_trim'] = 2
+        par['calibrations']['flatfield']['slit_illum_finecorr'] = False
+
+        # Tilts: reduce order for short fiber "slits"
+        par['calibrations']['tilts']['spat_order'] = 1
+        par['calibrations']['tilts']['spec_order'] = 1
+
+        # Flexure: use slit centers since no objects are extracted
+        par['flexure']['spec_method'] = 'slitcen'
+        par['flexure']['spec_maxshift'] = 3
+
+        # Flux calibration: extinction correction is done during datacube
+        # construction, not during 1D extraction
+        par['sensfunc']['UVIS']['extinct_correct'] = False
+
+        return par
+
+    def config_specific_par(
+            self,
+            inp:str|list|Path|fits.Header|Table,
+            inp_par:parset.ParSet|None=None
+        ) -> parset.ParSet:
+        """
+        Modify the PypeIt parameters to hard-wired values used for
+        specific instrument configurations.
+
+        Args:
+            inp: Input filename, header, or metadata table row.
+            inp_par: Parameter set. If None, use default.
+
+        Returns:
+            :class:`~pypeit.par.parset.ParSet`: Adjusted parameters.
+        """
+        par = super().config_specific_par(inp, inp_par=inp_par)
+
+        # Grating-dependent bspline spacing for sky subtraction
+        # (adopted from IDL pipeline knot spacings)
+        grating = self.get_meta_value(inp, 'dispname')
+        match grating:
+            case 'x270':
+                par['reduce']['skysub']['bspline_spacing'] = 1.05
+            case 'x600':
+                par['reduce']['skysub']['bspline_spacing'] = 0.5
+            case 'x1000':
+                par['reduce']['skysub']['bspline_spacing'] = 0.35
+
+        # Override mask design settings from parent's MOS config
+        # (IFU does not use mask design)
+        par['calibrations']['slitedges']['use_maskdesign'] = False
+        par['reduce']['slitmask']['assign_obj'] = False
+        par['reduce']['slitmask']['extract_missing_objs'] = False
+
+        return par
+
+    def get_wcs(self, hdr, slits, platescale, wave0, dwv, spatial_scale=None):
+        """
+        Construct a World-Coordinate System for the IFU datacube.
+
+        Args:
+            hdr (`astropy.io.fits.Header`_):
+                The header of the raw frame.
+            slits (:class:`~pypeit.slittrace.SlitTraceSet`):
+                Slit traces.
+            platescale (:obj:`float`):
+                The platescale of an unbinned pixel in arcsec/pixel.
+            wave0 (:obj:`float`):
+                The wavelength zeropoint.
+            dwv (:obj:`float`):
+                Change in wavelength per spectral pixel.
+            spatial_scale (:obj:`float`, optional):
+                User-specified spatial scale in arcsec.
+
+        Returns:
+            `astropy.wcs.WCS`_: The world-coordinate system.
+        """
+        log.info("Calculating the WCS for Binospec IFU")
+
+        # Get binning
+        binspec, binspat = parse.parse_binning(self.get_meta_value([hdr], 'binning'))
+
+        # Spatial scales
+        pxscl = platescale * binspat / 3600.0  # arcsec -> degrees
+        slscl = self.get_meta_value([hdr], 'slitwid')  # already in degrees
+
+        if spatial_scale is not None:
+            pxscl = spatial_scale / 3600.0
+
+        # Typical slit length
+        slitlength = int(np.round(np.median(slits.get_slitlengths(median=True))))
+
+        # Pointing coordinates
+        raval = self.get_meta_value([hdr], 'ra')
+        decval = self.get_meta_value([hdr], 'dec')
+        coord = SkyCoord(raval, decval, unit=(units.deg, units.deg))
+
+        # Position angle from POSANG header keyword
+        posang = hdr.get('POSANG', 0.0)
+        crota = np.radians(-posang)
+
+        # CD matrix
+        cdelt1 = -slscl
+        cdelt2 = pxscl
+        cd11 = cdelt1 * np.cos(crota)
+        cd12 = abs(cdelt2) * np.sign(cdelt1) * np.sin(crota)
+        cd21 = -abs(cdelt1) * np.sign(cdelt2) * np.sin(crota)
+        cd22 = cdelt2 * np.cos(crota)
+
+        # Reference pixels (center of FOV)
+        nslits = slits.nslits
+        crpix1 = nslits / 2.0
+        crpix2 = slitlength / 2.0
+        crpix3 = 1.0
+
+        # Create WCS
+        log.info("Generating Binospec IFU WCS")
+        w = wcs.WCS(naxis=3)
+        w.wcs.equinox = hdr.get('EQUINOX', 2000.0)
+        w.wcs.name = 'Binospec IFU'
+        w.wcs.radesys = 'ICRS'
+        w.wcs.cname = ['RA', 'DEC', 'Wavelength']
+        w.wcs.cunit = [units.degree, units.degree, units.Angstrom]
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN", "WAVE"]
+        w.wcs.crval = [coord.ra.degree, coord.dec.degree, wave0]
+        w.wcs.crpix = [crpix1, crpix2, crpix3]
+        w.wcs.cd = np.array([[cd11, cd12, 0.0],
+                             [cd21, cd22, 0.0],
+                             [0.0, 0.0, dwv]])
+        w.wcs.lonpole = 180.0
+        w.wcs.latpole = 0.0
+
+        return w
+
+    def get_datacube_bins(self, slitlength, minmax, num_wave):
+        r"""
+        Calculate the bin edges to be used when making a datacube.
+
+        Args:
+            slitlength (:obj:`int`):
+                Length of the slit in pixels.
+            minmax (`numpy.ndarray`_):
+                An array with the minimum and maximum pixel locations on
+                each slit relative to the reference location. Shape must
+                be :math:`(N_{\rm slits},2)`.
+            num_wave (:obj:`int`):
+                Number of wavelength steps.
+
+        Returns:
+            :obj:`tuple`: Three 1D `numpy.ndarray`_ providing the
+            :math:`(x,y,\lambda)` bins for datacube construction.
+        """
+        # Number of fiber traces (slits) is determined from minmax
+        nslits = minmax.shape[0]
+        ref_slit = nslits // 2
+        xbins = np.arange(1 + nslits) - ref_slit - 0.5
+        ybins = np.linspace(np.min(minmax[:, 0]), np.max(minmax[:, 1]),
+                            1 + slitlength) - 0.5
+        spec_bins = np.arange(1 + num_wave) - 0.5
+        return xbins, ybins, spec_bins
+
+    @staticmethod
+    def _ifu_calib_path():
+        """Return the path to the IFU calibration data directory."""
+        return Path(__file__).resolve().parent.parent / 'data' / 'spectrographs' / 'mmt_binospec'
+
+    def load_fiber_ref_profile(self, det):
+        """
+        Load the reference fiber trace profile for fiber identification.
+
+        The reference profile contains the expected pixel positions and
+        Gaussian-Hermite profile parameters for each fiber, obtained
+        from a high-quality flat field observation. This is used to
+        cross-match detected fiber traces against known fiber IDs.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+
+        Returns:
+            `astropy.io.fits.FITS_rec`_: Table with columns:
+                FIB_ID, X, Y, SIDE, FIB_NAME, FIB_TYPE, FIB_BLOCK,
+                FIB_DEAD_FLAG, TR_A0, TR_PIX, TR_SIGMA, TR_BGR,
+                TR_H3, TR_H4, TR_H5, TR_H6.
+        """
+        ref_file = self._ifu_calib_path() / 'fiber_ref_profile.fits'
+        # ext 1 = IFUTRACES_A (side A, det 1), ext 2 = IFUTRACES_B (side B, det 2)
+        ext = 1 if det == 1 else 2
+        with fits.open(ref_file) as hdu:
+            data = hdu[ext].data.copy()
+        return data
+
+    def load_sky_layout(self):
+        """
+        Load the IFU fiber-to-sky position mapping.
+
+        Returns the on-sky x,y positions (in arcsec) for all 640 fibers
+        in the hexagonal IFU field of view.
+
+        Returns:
+            :obj:`tuple`:
+                - targetx_asec (`numpy.ndarray`_): x positions in arcsec (640,)
+                - targety_asec (`numpy.ndarray`_): y positions in arcsec (640,)
+        """
+        sky_file = self._ifu_calib_path() / 'bino_IFU_sky_layout.fits'
+        with fits.open(sky_file) as hdu:
+            data = hdu[1].data[0]
+            targetx = data['TARGETX_ASEC'].copy()
+            targety = data['TARGETY_ASEC'].copy()
+        return targetx, targety
+
+    def load_fiber_illumination(self, det):
+        """
+        Load the fiber-to-fiber illumination correction (throughput map).
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+
+        Returns:
+            `numpy.ndarray`_: Relative illumination correction per fiber (nfibers,).
+        """
+        illum_file = self._ifu_calib_path() / 'fiber_illumination.fits'
+        # Row 0 = side A, row 1 = side B
+        row = 0 if det == 1 else 1
+        with fits.open(illum_file) as hdu:
+            f_illum = hdu[1].data['F_ILLUM'][row].copy()
+        return f_illum
+
+    def get_sky_fiber_mask(self, det, nslits):
+        """
+        Return a boolean mask identifying which fiber/slit indices are
+        dedicated sky fibers.
+
+        The Binospec IFU has 40 dedicated sky fibers per side, located
+        at the outermost ring of each hexagonal sub-bundle. These fibers
+        observe blank sky and are used for sky subtraction.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number.
+            nslits (:obj:`int`):
+                Total number of detected fiber traces (slits).
+
+        Returns:
+            `numpy.ndarray`_: Boolean array of shape (nslits,), True for
+            sky fibers.
+        """
+        nfibers = self.nfibers_a if det == 1 else self.nfibers_b
+        sky_mask = np.zeros(nfibers, dtype=bool)
+        valid_sky = self.sky_fiber_indices_0based[self.sky_fiber_indices_0based < nfibers]
+        sky_mask[valid_sky] = True
+        # If fewer traces detected than expected, truncate
+        if nslits < nfibers:
+            log.warning(f"Detected {nslits} fiber traces but expected {nfibers}. "
+                        f"Sky fiber mask may be incomplete.")
+            sky_mask = sky_mask[:nslits]
+        elif nslits > nfibers:
+            sky_mask = np.pad(sky_mask, (0, nslits - nfibers), constant_values=False)
+        return sky_mask
+
+    def match_fibers_to_reference(self, det, detected_positions):
+        """
+        Cross-match detected fiber trace positions against the reference
+        profile to assign physical fiber IDs.
+
+        Uses the algorithm from the IDL pipeline (bino_ifu_fiber_id.pro):
+        compute cross-correlation between the detected fiber positions
+        and the reference profile, then match individual fibers using a
+        distance threshold.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+            detected_positions (`numpy.ndarray`_):
+                Detected fiber center positions in pixels at a reference
+                column (e.g., center of detector).
+
+        Returns:
+            :obj:`tuple`:
+                - fiber_ids (`numpy.ndarray`_): Physical fiber IDs for each
+                  detected trace, or -1 if unmatched.
+                - is_sky (`numpy.ndarray`_): Boolean array, True for sky fibers.
+                - is_dead (`numpy.ndarray`_): Boolean array, True for dead fibers
+                  in the reference that were not detected.
+        """
+        ref = self.load_fiber_ref_profile(det)
+        ref_positions = ref['TR_PIX']
+        ref_ids = ref['FIB_ID']
+        ref_dead = ref['FIB_DEAD_FLAG'].astype(bool)
+        nfibers = self.nfibers_a if det == 1 else self.nfibers_b
+
+        # Compute global offset via cross-correlation of position histograms
+        # (simplified version of the IDL 5-segment approach)
+        nbins = 4200  # slightly larger than detector width
+        ref_hist = np.zeros(nbins)
+        det_hist = np.zeros(nbins)
+        for pos in ref_positions[~ref_dead]:
+            idx = int(np.round(pos))
+            if 0 <= idx < nbins:
+                ref_hist[idx] = 1.0
+        for pos in detected_positions:
+            idx = int(np.round(pos))
+            if 0 <= idx < nbins:
+                det_hist[idx] = 1.0
+
+        # Cross-correlate to find global shift
+        corr = np.correlate(det_hist, ref_hist, mode='full')
+        lag = np.arange(len(corr)) - (nbins - 1)
+        # Search within +/- 50 pixels
+        mask = np.abs(lag) < 50
+        best_lag = lag[mask][np.argmax(corr[mask])]
+
+        # Match fibers using distance threshold (1.7 pixels, from IDL pipeline)
+        dx_thr = 1.7
+        shifted_ref = ref_positions + best_lag
+        fiber_ids = np.full(len(detected_positions), -1, dtype=int)
+        matched = np.zeros(len(ref_positions), dtype=bool)
+
+        for i, dpos in enumerate(detected_positions):
+            dists = np.abs(shifted_ref - dpos)
+            dists[matched] = np.inf
+            best = np.argmin(dists)
+            if dists[best] < dx_thr:
+                fiber_ids[i] = ref_ids[best]
+                matched[best] = True
+
+        # Determine sky fiber status from matched IDs (using 1-based fiber IDs)
+        is_sky = np.isin(fiber_ids, self.sky_fiber_ids) & (fiber_ids >= 0)
+
+        # Dead fibers: reference fibers that were not matched
+        is_dead = ~matched & ~ref_dead
+
+        log.info(f"Fiber matching: {np.sum(fiber_ids >= 0)}/{len(detected_positions)} "
+                 f"detected traces matched to reference ({np.sum(is_sky)} sky fibers, "
+                 f"{np.sum(is_dead)} dead fibers)")
+
+        return fiber_ids, is_sky, is_dead
 
