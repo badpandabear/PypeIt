@@ -1257,9 +1257,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['scienceframe']['process']['use_biasimage'] = False
         par['scienceframe']['process']['use_darkimage'] = False
 
-        # Skip 1D extraction for IFU data - extraction before DAR correction
-        # is meaningless
+        # Skip 1D extraction and object finding for IFU data — extraction
+        # is done manually after datacube construction
         par['reduce']['extraction']['skip_extraction'] = True
+        par['reduce']['findobj']['skip_skysub'] = True
+        par['reduce']['findobj']['snr_thresh'] = 1000.0
 
         # NOTE: Binospec IFU is fiber-fed, not slicer-based. Ideally
         # slit_spec=False, but that code path is not yet implemented in
@@ -1272,20 +1274,27 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         # Sky subtraction: use joint fit across all fibers
         par['reduce']['skysub']['no_poly'] = True
         par['reduce']['skysub']['joint_fit'] = True
+        # Avoid trimming edges of narrow IFU fibers (~5-6 pixels wide)
+        par['reduce']['trim_edge'] = [0, 0]
 
-        # Slit edge parameters tuned for densely-packed fibers
+        # Slit edge parameters tuned for densely-packed IFU fibers.
+        # Fibers are ~7 pixels peak-to-peak with ~5-6 pixel widths and
+        # inter-fiber gaps of only ~2 pixels.
         par['calibrations']['slitedges']['edge_thresh'] = 5.
         par['calibrations']['slitedges']['minimum_slit_gap'] = 0.
-        par['calibrations']['slitedges']['minimum_slit_length'] = 2.
+        # Fiber widths are ~5-6 pixels = ~1.2-1.4 arcsec at 0.24"/pix
+        par['calibrations']['slitedges']['minimum_slit_length'] = 0.5
         par['calibrations']['slitedges']['pad'] = 0
         par['calibrations']['slitedges']['use_maskdesign'] = False
+        # Default min_edge_side_sep=5 * fwhm_gaussian=3 = 15 pixels,
+        # which merges adjacent fibers. Reduce so edges can be as close
+        # as ~3 pixels apart (1 * 3 = 3 pixels).
+        par['calibrations']['slitedges']['fwhm_gaussian'] = 2.0
+        par['calibrations']['slitedges']['min_edge_side_sep'] = 1.0
 
-        # Flat field: tweak edges for IFU fibers
-        par['calibrations']['flatfield']['tweak_slits'] = True
-        par['calibrations']['flatfield']['tweak_method'] = 'gradient'
-        par['calibrations']['flatfield']['tweak_slits_thresh'] = 0.0
-        par['calibrations']['flatfield']['tweak_slits_maxfrac'] = 0.0
-        par['calibrations']['flatfield']['slit_trim'] = 2
+        # Flat field: no edge tweaking for fiber-fed IFU (fixed positions)
+        par['calibrations']['flatfield']['tweak_slits'] = False
+        par['calibrations']['flatfield']['slit_trim'] = 0
         par['calibrations']['flatfield']['slit_illum_finecorr'] = False
 
         # Tilts: reduce order for short fiber "slits"
@@ -1331,9 +1340,12 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             case 'x1000':
                 par['reduce']['skysub']['bspline_spacing'] = 0.35
 
-        # Override mask design settings from parent's MOS config
-        # (IFU does not use mask design)
+        # Override MOS-specific settings from parent's config_specific_par
+        # that are inappropriate for IFU fibers
         par['calibrations']['slitedges']['use_maskdesign'] = False
+        par['calibrations']['slitedges']['minimum_slit_length'] = 0.5
+        par['calibrations']['slitedges']['edge_thresh'] = 5.
+        par['calibrations']['slitedges']['sync_predict'] = 'nearest'
         par['reduce']['slitmask']['assign_obj'] = False
         par['reduce']['slitmask']['extract_missing_objs'] = False
 

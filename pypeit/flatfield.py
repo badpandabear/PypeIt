@@ -989,14 +989,28 @@ class FlatField:
             # Collapse the slit spatially and fit the spectral function
             # TODO: Put this stuff in a self.spectral_fit method?
 
-            # Create the tilts image for this slit
+            # Create the tilts for pixels in this slit only (not full image)
             if self.slitless:
                 tilts = np.tile(np.arange(rawflat.shape[0]) / rawflat.shape[0], (rawflat.shape[1], 1)).T
+                spec_coo = tilts * (nspec-1)
             else:
                 # TODO -- JFH Confirm the sign of this shift is correct!
                 _flexure = 0. if self.wavetilts.spat_flexure is None else self.wavetilts.spat_flexure
-                tilts = tracewave.fit2tilts(rawflat.shape, self.wavetilts['coeffs'][:,:,slit_idx],
-                                            self.wavetilts['func2d'], spat_shift=-1*_flexure)
+                # Evaluate tilts only at slit pixels to save memory
+                _coeff = self.wavetilts['coeffs'][:,:,slit_idx]
+                _spec, _spat = np.where(onslit_padded)
+                _pypeitFit = fitting.PypeItFit(fitc=_coeff, minx=0.0, maxx=1.0,
+                                               minx2=0.0, maxx2=1.0,
+                                               func=self.wavetilts['func2d'])
+                _xnspecmin1 = float(nspec - 1)
+                _xnspatmin1 = float(rawflat.shape[1] - 1)
+                _tilts_slit = _pypeitFit.eval(_spec / _xnspecmin1,
+                                              x2=(_spat + _flexure) / _xnspatmin1)
+                _tilts_slit = np.fmax(np.fmin(_tilts_slit, 1.2), -0.2)
+                # Build a full-frame tilts image placeholder with only slit pixels filled
+                tilts = np.zeros(rawflat.shape, dtype=float)
+                tilts[onslit_padded] = _tilts_slit
+                del _tilts_slit, _spec, _spat
             # Convert the tilt image to an image with the spectral pixel index
             spec_coo = tilts * (nspec-1)
 
