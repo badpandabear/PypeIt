@@ -551,8 +551,8 @@ class SlitTraceSet(calibframe.CalibFrame):
             onslit = (slitid_img_init == spatid)
             onslit_init = np.where(onslit)
             if self.mask[slit_idx] != 0:
-                raise PypeItError(f'Slit {spatid} ({slit_idx+1}/{self.spat_id.size}) is masked. Cannot '
-                           'generate RA/DEC image.')
+                log.info(f'Slit {spatid} ({slit_idx+1}/{self.spat_id.size}) is masked. Skipping RA/DEC.')
+                continue
             # Retrieve the pixel offset from the central trace
             evalpos = alignSplines.transform(slit_idx, onslit_init[1], onslit_init[0])
             minmax[slit_idx, 0] = np.min(evalpos)
