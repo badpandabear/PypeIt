@@ -1561,6 +1561,43 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             sky_mask = np.pad(sky_mask, (0, nslits - nfibers), constant_values=False)
         return sky_mask
 
+    def get_science_fiber_layout_indices(self, det, nslits):
+        """
+        Map PypeIt slit indices to layout file indices for science fibers.
+
+        The layout file (``bino_IFU_sky_layout.fits``) contains 640 entries:
+        indices 0-319 for side A science fibers and 320-639 for side B.
+        This method maps each PypeIt slit/fiber index to the corresponding
+        layout file index, using a simple sequential mapping after removing
+        sky fiber indices.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+            nslits (:obj:`int`):
+                Total number of detected fiber traces (slits).
+
+        Returns:
+            `numpy.ndarray`_: Array of shape ``(nslits,)`` with layout file
+            indices (0-639) for each slit. Sky fibers are assigned -1.
+        """
+        sky_mask = self.get_sky_fiber_mask(det, nslits)
+        layout_indices = np.full(nslits, -1, dtype=int)
+
+        # Layout file offset: 0 for side A (det 1), 320 for side B (det 2)
+        offset = 0 if det == 1 else 320
+
+        # Science fibers map sequentially to layout entries
+        sci_counter = 0
+        for i in range(nslits):
+            if not sky_mask[i]:
+                layout_indices[i] = offset + sci_counter
+                sci_counter += 1
+
+        log.info(f"Mapped {sci_counter} science fibers to layout indices "
+                 f"(det={det}, offset={offset})")
+        return layout_indices
+
     def match_fibers_to_reference(self, det, detected_positions):
         """
         Cross-match detected fiber trace positions against the reference
