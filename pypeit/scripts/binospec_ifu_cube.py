@@ -35,6 +35,9 @@ class BinospecIFUCube(scriptbase.ScriptBase):
                             help='Output spatial pixel scale in arcsec (default: 0.27)')
         parser.add_argument('--no_skysub', default=False, action='store_true',
                             help='Skip sky subtraction')
+        parser.add_argument('--use_fibers', default=False, action='store_true',
+                            help='Use dedicated sky fibers for sky subtraction '
+                                 'instead of the default spec2d skymodel')
         parser.add_argument('--method', type=str, default='linear',
                             choices=['nearest', 'linear', 'cubic'],
                             help='Spatial interpolation method (default: linear)')
@@ -180,37 +183,45 @@ class BinospecIFUCube(scriptbase.ScriptBase):
             n_sci = np.sum(~sky_mask)
             log.info(f"  {det_name}: {n_sky} sky fibers, {n_sci} science fibers")
 
-            if not args.no_skysub and n_sky > 0:
-                log.info(f"  Computing sky spectrum from {n_sky} sky fibers")
+            if not args.no_skysub:
+                if args.use_fibers and n_sky > 0:
+                    log.info(f"  Computing sky spectrum from {n_sky} sky fibers")
 
-                # Sigma-clipped mean of sky fiber spectra
-                sky_spectra = data['flux'][sky_mask]
-                # Use 3-sigma clipping matching IDL resistant_mean
-                sky_mean = np.zeros(data['flux'].shape[1])
-                for col in range(len(sky_mean)):
-                    vals = sky_spectra[:, col]
-                    good = vals != 0
-                    if np.sum(good) >= 3:
-                        mean, _, _ = sigma_clipped_stats(vals[good], sigma=3.0)
-                        sky_mean[col] = mean
-                    elif np.sum(good) > 0:
-                        sky_mean[col] = np.mean(vals[good])
+                    # Sigma-clipped mean of sky fiber spectra
+                    sky_spectra = data['flux'][sky_mask]
+                    # Use 3-sigma clipping matching IDL resistant_mean
+                    sky_mean = np.zeros(data['flux'].shape[1])
+                    for col in range(len(sky_mean)):
+                        vals = sky_spectra[:, col]
+                        good = vals != 0
+                        if np.sum(good) >= 3:
+                            mean, _, _ = sigma_clipped_stats(
+                                vals[good], sigma=3.0)
+                            sky_mean[col] = mean
+                        elif np.sum(good) > 0:
+                            sky_mean[col] = np.mean(vals[good])
 
-                # Subtract sky from all fibers
-                data['flux'] -= sky_mean[np.newaxis, :]
+                    # Subtract sky from all fibers
+                    data['flux'] -= sky_mean[np.newaxis, :]
 
-                # Propagate variance (sky subtraction adds sky variance)
-                sky_ivar_spectra = data['ivar'][sky_mask]
-                sky_var = np.zeros(data['flux'].shape[1])
-                for col in range(len(sky_var)):
-                    ivals = sky_ivar_spectra[:, col]
-                    good = ivals > 0
-                    if np.sum(good) > 0:
-                        sky_var[col] = 1.0 / np.sum(ivals[good])
-                sci_mask = ~sky_mask
-                old_var = np.where(data['ivar'] > 0, 1.0 / data['ivar'], 0.0)
-                new_var = old_var + sky_var[np.newaxis, :]
-                data['ivar'] = np.where(new_var > 0, 1.0 / new_var, 0.0)
+                    # Propagate variance (sky subtraction adds sky variance)
+                    sky_ivar_spectra = data['ivar'][sky_mask]
+                    sky_var = np.zeros(data['flux'].shape[1])
+                    for col in range(len(sky_var)):
+                        ivals = sky_ivar_spectra[:, col]
+                        good = ivals > 0
+                        if np.sum(good) > 0:
+                            sky_var[col] = 1.0 / np.sum(ivals[good])
+                    sci_mask = ~sky_mask
+                    old_var = np.where(data['ivar'] > 0,
+                                      1.0 / data['ivar'], 0.0)
+                    new_var = old_var + sky_var[np.newaxis, :]
+                    data['ivar'] = np.where(new_var > 0,
+                                            1.0 / new_var, 0.0)
+                else:
+                    # Default: use the per-fiber sky from PypeIt's skymodel
+                    log.info(f"  Subtracting sky using spec2d skymodel")
+                    data['flux'] -= data['sky']
 
             # Store masks
             data['sky_mask'] = sky_mask

@@ -49,8 +49,8 @@ class with the ``SlicerIFU`` pipeline.
 
 Key IFU parameters set by default:
 
-- 1D extraction is skipped (``skip_extraction = True``); datacubes are
-  built directly from the 2D spectra
+- 1D extraction is skipped (``skip_extraction = True``); extraction is
+  performed during datacube construction
 - Joint sky fitting across all fibers (``joint_fit = True``)
 - Grating-dependent B-spline spacing for sky subtraction:
   1.05 Angstrom (270 gpm), 0.5 Angstrom (600 gpm), 0.35 Angstrom
@@ -61,4 +61,106 @@ Key IFU parameters set by default:
 
 For a detailed comparison of the PypeIt and IDL IFU pipeline approaches,
 see :ref:`mmt_binospec_pipeline_comparison`.
+
+Reducing IFU data
++++++++++++++++++
+
+IFU data are reduced using the standard ``run_pypeit`` workflow.  PypeIt
+will automatically detect IFU frames from the ``MASK = 'IFU'`` header
+keyword.  Both detectors (``DET01`` for side A and ``DET02`` for side B)
+are processed and written to separate spec2d output files.
+
+.. code-block:: bash
+
+   pypeit_setup -r /path/to/raw -s mmt_binospec_ifu -b
+   run_pypeit mmt_binospec_ifu_A/mmt_binospec_ifu_A.pypeit
+
+Producing datacubes
++++++++++++++++++++
+
+Because the Binospec IFU is fiber-fed rather than slicer-based, the
+general-purpose ``pypeit_coadd_datacube`` script (designed for slicer
+IFUs like KCWI) does not produce correct results.  Instead, use the
+dedicated ``pypeit_binospec_ifu_cube`` script, which implements the
+fiber-based datacube construction workflow:
+
+1. Extracts each fiber as a 1D spectrum from the spec2d files via
+   boxcar summation
+2. Subtracts sky using PypeIt's per-fiber B-spline sky model from the
+   spec2d file (default), or optionally using the 40 dedicated sky
+   fibers per side (``--use_fibers``)
+3. Resamples all fiber spectra onto a common linear wavelength grid
+4. Combines both detectors (up to 640 science fibers total)
+5. Maps each fiber to its on-sky position using the IFU layout
+   calibration file (``bino_IFU_sky_layout.fits``)
+6. Interpolates the irregularly-spaced fiber positions onto a regular
+   spatial grid using ``scipy.interpolate.griddata``
+
+.. note::
+
+   The two Binospec detectors produce mirror-image spectra.  The script
+   automatically accounts for this by reversing the fiber-to-sky mapping
+   for side B so that the two halves of the IFU tile correctly.
+
+Basic usage
+^^^^^^^^^^^
+
+To build a datacube from one or more spec2d files:
+
+.. code-block:: bash
+
+   pypeit_binospec_ifu_cube spec2d_*.fits
+
+This processes both detectors, applies sky subtraction, and writes the
+output datacube to a FITS file with extensions ``FLUX`` and ``VAR``.
+
+Command-line options
+^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: bash
+
+   pypeit_binospec_ifu_cube spec2d_*.fits [options]
+
+``--det DET01 DET02``
+   Detector(s) to process.  Default is both ``DET01`` and ``DET02``.
+   Use ``--det DET01`` to process only side A.
+
+``--output FILENAME``
+   Output FITS filename.  Default is auto-generated from the input
+   filename (e.g., ``cube_sci_img_*.fits``).
+
+``--spatial_scale SCALE``
+   Output spatial pixel scale in arcsec.  Default is 0.27, which
+   matches the IDL pipeline (``scl = 0.269461``).
+
+``--no_skysub``
+   Skip sky subtraction entirely.
+
+``--use_fibers``
+   Use the 40 dedicated sky fibers per side to compute a
+   sigma-clipped mean sky spectrum for subtraction (matching the IDL
+   pipeline approach).  By default, the script uses PypeIt's
+   per-fiber B-spline sky model from the spec2d file, which does a
+   better job handling bright features in the sky background.
+
+``--method METHOD``
+   Spatial interpolation method: ``nearest``, ``linear`` (default), or
+   ``cubic``.  The ``linear`` method is recommended for most use cases.
+
+Output format
+^^^^^^^^^^^^^
+
+The output FITS file contains:
+
+- **Extension 0** (``PRIMARY``): Empty primary HDU
+- **Extension 1** (``FLUX``): 3D datacube with axes
+  (NAXIS1=RA, NAXIS2=DEC, NAXIS3=wavelength) and a full 3-axis WCS
+  (``RA---TAN``, ``DEC--TAN``, ``WAVE``)
+- **Extension 2** (``VAR``): Variance datacube with the same shape and
+  WCS
+
+The cube can be viewed directly with tools like ds9 or QFitsView.
+Typical output dimensions for the default spatial scale are approximately
+63 x 47 spatial pixels, with the number of wavelength pixels depending
+on the grating and wavelength coverage.
 
