@@ -105,14 +105,16 @@ fiber-based datacube construction workflow:
 Basic usage
 ^^^^^^^^^^^
 
-To build a datacube from one or more spec2d files:
+To build datacubes from spec2d files:
 
 .. code-block:: bash
 
    pypeit_binospec_ifu_cube spec2d_*.fits
 
-This processes both detectors, applies sky subtraction, and writes the
-output datacube to a FITS file with extensions ``FLUX`` and ``VAR``.
+Each input spec2d file produces a separate output datacube.  For
+example, three input files will produce three cubes named
+``cube_sci_img_*.fits``.  Each cube combines both detectors, applies
+sky subtraction, and contains ``FLUX`` and ``VAR`` extensions.
 
 Command-line options
 ^^^^^^^^^^^^^^^^^^^^
@@ -126,8 +128,9 @@ Command-line options
    Use ``--det DET01`` to process only side A.
 
 ``--output FILENAME``
-   Output FITS filename.  Default is auto-generated from the input
-   filename (e.g., ``cube_sci_img_*.fits``).
+   Output FITS filename.  Only valid when processing a single input
+   file.  Default is auto-generated from the input filename
+   (e.g., ``cube_sci_img_*.fits``).
 
 ``--spatial_scale SCALE``
    Output spatial pixel scale in arcsec.  Default is 0.27, which
