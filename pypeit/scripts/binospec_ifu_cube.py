@@ -41,6 +41,9 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         parser.add_argument('--use_fibers', default=False, action='store_true',
                             help='Use dedicated sky fibers for sky subtraction '
                                  'instead of the default spec2d skymodel')
+        parser.add_argument('--boxcar', default=False, action='store_true',
+                            help='Use boxcar extraction instead of optimal '
+                                 '(profile-weighted) extraction')
         parser.add_argument('--method', type=str, default='linear',
                             choices=['nearest', 'linear', 'cubic'],
                             help='Spatial interpolation method (default: linear)')
@@ -140,11 +143,21 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
         nfibers = len(spat_ids)
         log.info(f"    Found {nfibers} fiber traces")
 
-        # Extract each fiber via boxcar sum
+        # Compute fiber trace centers at each spectral row
+        left = slits.left_init
+        right = slits.right_init
+        trace_centers = (left + right) / 2.0  # (nspec, nfibers)
+        trace_sigma = (right - left) / (2.0 * 2.3548)  # FWHM -> sigma
+
         fiber_flux = np.zeros((nfibers, nspec))
         fiber_ivar = np.zeros((nfibers, nspec))
         fiber_wave = np.zeros((nfibers, nspec))
         fiber_sky = np.zeros((nfibers, nspec))
+
+        if args.boxcar:
+            log.info(f"    Using boxcar extraction")
+        else:
+            log.info(f"    Using optimal (profile-weighted) extraction")
 
         for i, spat_id in enumerate(spat_ids):
             onslit = slitid_img == spat_id
@@ -159,15 +172,50 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
                 pix = good[row, :]
                 if not np.any(pix):
                     continue
-                fiber_flux[i, row] = np.sum(sciimg[row, pix])
-                fiber_sky[i, row] = np.sum(skymodel[row, pix])
-                # Sum ivar: for boxcar, 1/var_sum = 1/sum(var_i)
-                ivar_pix = ivarraw[row, pix]
-                good_ivar = ivar_pix > 0
-                if np.any(good_ivar):
-                    fiber_ivar[i, row] = 1.0 / np.sum(
-                        1.0 / ivar_pix[good_ivar])
+
                 fiber_wave[i, row] = np.median(waveimg[row, pix])
+
+                if args.boxcar:
+                    # Boxcar: simple sum
+                    fiber_flux[i, row] = np.sum(sciimg[row, pix])
+                    fiber_sky[i, row] = np.sum(skymodel[row, pix])
+                    ivar_pix = ivarraw[row, pix]
+                    good_ivar = ivar_pix > 0
+                    if np.any(good_ivar):
+                        fiber_ivar[i, row] = 1.0 / np.sum(
+                            1.0 / ivar_pix[good_ivar])
+                else:
+                    # Optimal extraction (Horne 1986)
+                    # Build Gaussian profile at pixel positions
+                    cols = np.where(pix)[0]
+                    sig = trace_sigma[row, i]
+                    if sig < 0.1:
+                        sig = 1.0  # fallback for bad trace
+                    cen = trace_centers[row, i]
+                    profile = np.exp(-0.5 * ((cols - cen) / sig) ** 2)
+                    psum = np.sum(profile)
+                    if psum <= 0:
+                        continue
+                    profile /= psum  # normalize to sum=1
+
+                    iv = ivarraw[row, cols]
+                    good_iv = iv > 0
+
+                    if not np.any(good_iv):
+                        continue
+
+                    # Horne Eq. 8: flux = sum(P * ivar * data) / sum(P^2 * ivar)
+                    denom = np.sum(profile[good_iv] ** 2 * iv[good_iv])
+                    if denom <= 0:
+                        continue
+                    fiber_flux[i, row] = (
+                        np.sum(profile[good_iv] * iv[good_iv]
+                               * sciimg[row, cols[good_iv]]) / denom)
+                    fiber_sky[i, row] = (
+                        np.sum(profile[good_iv] * iv[good_iv]
+                               * skymodel[row, cols[good_iv]]) / denom)
+                    # Horne Eq. 9: var = sum(P) / sum(P^2 * ivar)
+                    fiber_ivar[i, row] = denom / np.sum(profile[good_iv])
 
         det_fiber_data[det_name] = {
             'flux': fiber_flux,

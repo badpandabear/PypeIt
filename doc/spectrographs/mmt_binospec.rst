@@ -84,8 +84,10 @@ IFUs like KCWI) does not produce correct results.  Instead, use the
 dedicated ``pypeit_binospec_ifu_cube`` script, which implements the
 fiber-based datacube construction workflow:
 
-1. Extracts each fiber as a 1D spectrum from the spec2d files via
-   boxcar summation
+1. Extracts each fiber as a 1D spectrum from the spec2d files using
+   optimal (Horne 1986) profile-weighted extraction with a Gaussian
+   spatial profile derived from the slit edges, or boxcar summation
+   if ``--boxcar`` is specified
 2. Subtracts sky using PypeIt's per-fiber B-spline sky model from the
    spec2d file (default), or optionally using the 40 dedicated sky
    fibers per side (``--use_fibers``)
@@ -145,6 +147,12 @@ Command-line options
    pipeline approach).  By default, the script uses PypeIt's
    per-fiber B-spline sky model from the spec2d file, which does a
    better job handling bright features in the sky background.
+
+``--boxcar``
+   Use boxcar (unweighted sum) extraction instead of the default
+   optimal (Horne 1986) profile-weighted extraction.  Boxcar may be
+   preferable for extended sources that do not match the Gaussian
+   fiber profile.
 
 ``--method METHOD``
    Spatial interpolation method: ``nearest``, ``linear`` (default), or
