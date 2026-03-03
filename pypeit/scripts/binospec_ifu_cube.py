@@ -172,7 +172,31 @@ class BinospecIFUCube(scriptbase.ScriptBase):
             raise PypeItError("No detector data extracted.")
 
         # ----------------------------------------------------------------
-        # Step 2 & 3: Identify sky fibers and sky-subtract
+        # Step 2: Apply fiber-to-fiber illumination correction
+        # ----------------------------------------------------------------
+        for det_name, data in det_fiber_data.items():
+            det_num = int(det_name.replace('DET', ''))
+            nfibers = data['flux'].shape[0]
+            f_illum = spectrograph.load_fiber_illumination(det_num)
+            # Truncate or pad to match number of detected fibers
+            if len(f_illum) > nfibers:
+                f_illum = f_illum[:nfibers]
+            elif len(f_illum) < nfibers:
+                f_illum = np.pad(f_illum, (0, nfibers - len(f_illum)),
+                                 constant_values=1.0)
+            # Avoid division by zero for dead fibers
+            good = f_illum > 0.1
+            log.info(f"  {det_name}: applying fiber illumination correction "
+                     f"(range {f_illum[good].min():.3f} - "
+                     f"{f_illum[good].max():.3f})")
+            for i in range(nfibers):
+                if good[i]:
+                    data['flux'][i] /= f_illum[i]
+                    data['sky'][i] /= f_illum[i]
+                    data['ivar'][i] *= f_illum[i] ** 2
+
+        # ----------------------------------------------------------------
+        # Step 3: Identify sky fibers and sky-subtract
         # ----------------------------------------------------------------
         for det_name, data in det_fiber_data.items():
             det_num = int(det_name.replace('DET', ''))
