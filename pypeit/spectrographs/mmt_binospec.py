@@ -1568,8 +1568,17 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         The layout file (``bino_IFU_sky_layout.fits``) contains 640 entries:
         indices 0-319 for side A science fibers and 320-639 for side B.
         This method maps each PypeIt slit/fiber index to the corresponding
-        layout file index, using a simple sequential mapping after removing
-        sky fiber indices.
+        layout file index, using sequential mapping after removing sky
+        fiber indices.
+
+        Side B (det 2) fibers are mapped in reverse order because the two
+        Binospec detectors produce mirror-image spectra: on side A the
+        first science fiber (leftmost on detector) corresponds to the
+        highest X on sky, while on side B the first science fiber
+        (leftmost on detector) corresponds to the most negative X on sky.
+        The layout file stores side B entries with X increasing (entry 320
+        is most negative X, entry 639 is least negative X), so side B
+        detector order must be reversed to match.
 
         Args:
             det (:obj:`int`):
@@ -1583,15 +1592,21 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         """
         sky_mask = self.get_sky_fiber_mask(det, nslits)
         layout_indices = np.full(nslits, -1, dtype=int)
+        n_sci = int(np.sum(~sky_mask))
 
         # Layout file offset: 0 for side A (det 1), 320 for side B (det 2)
         offset = 0 if det == 1 else 320
 
-        # Science fibers map sequentially to layout entries
+        # Science fibers map sequentially to layout entries.
+        # Side A: forward order (detector left = layout 0).
+        # Side B: reverse order (detector left = layout 320 + n_sci - 1).
         sci_counter = 0
         for i in range(nslits):
             if not sky_mask[i]:
-                layout_indices[i] = offset + sci_counter
+                if det == 1:
+                    layout_indices[i] = offset + sci_counter
+                else:
+                    layout_indices[i] = offset + (n_sci - 1 - sci_counter)
                 sci_counter += 1
 
         log.info(f"Mapped {sci_counter} science fibers to layout indices "
