@@ -15,13 +15,25 @@ Each input spec2d file produces a separate output datacube.
 .. include:: ../include/links.rst
 """
 
+from __future__ import annotations
+
+import argparse
+import logging
+from typing import TYPE_CHECKING
+
+import numpy as np
+
 from pypeit.scripts import scriptbase
+
+if TYPE_CHECKING:
+    from pypeit.spec2dobj import Spec2DObj
+    from pypeit.spectrographs.spectrograph import Spectrograph
 
 
 class BinospecIFUCube(scriptbase.ScriptBase):
 
     @classmethod
-    def get_parser(cls, width=None):
+    def get_parser(cls, width: int | None = None) -> argparse.ArgumentParser:
         parser = super().get_parser(
             description='Build a datacube from Binospec IFU spec2d files.',
             width=width,
@@ -54,19 +66,12 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         return parser
 
     @classmethod
-    def main(cls, args):
+    def main(cls, args: argparse.Namespace) -> None:
         import os
 
-        import numpy as np
-        from astropy import units
-        from astropy.coordinates import SkyCoord
         from astropy.io import fits
-        from astropy.stats import sigma_clipped_stats
-        from astropy import wcs
-        from scipy.interpolate import griddata
 
         from pypeit import log, PypeItError
-        from pypeit.spec2dobj import AllSpec2DObj
         from pypeit.spectrographs.util import load_spectrograph
 
         cls.init_log(args)
@@ -74,7 +79,7 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         # ----------------------------------------------------------------
         # Parse input files
         # ----------------------------------------------------------------
-        spec2d_files = []
+        spec2d_files: list[str] = []
         for f in args.files:
             if f.endswith('.txt'):
                 with open(f, 'r') as fh:
@@ -104,12 +109,11 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         # ----------------------------------------------------------------
         for spec2d_file in spec2d_files:
             log.info(f"Building datacube for {os.path.basename(spec2d_file)}")
-            _build_cube(spec2d_file, args, spectrograph, targetx, targety,
-                        log, PypeItError, np, units, SkyCoord, fits,
-                        sigma_clipped_stats, wcs, griddata)
+            _build_cube(spec2d_file, args, spectrograph, targetx, targety)
 
 
-def _load_flat(spec2d, det_name, log):
+def _load_flat(spec2d: Spec2DObj, det_name: str,
+               log: logging.Logger) -> np.ndarray | None:
     """Load the flat field image associated with a Spec2DObj.
 
     Parameters
@@ -153,8 +157,9 @@ def _load_flat(spec2d, det_name, log):
         return None
 
 
-def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec,
-                              nspat, np, log):
+def _build_empirical_profiles(flatimg: np.ndarray, slitid_img: np.ndarray,
+                              spat_ids: np.ndarray, nspec: int, nspat: int,
+                              log: logging.Logger) -> list[np.ndarray] | None:
     """Build empirical spatial profiles for each fiber from the flat field.
 
     For each fiber, the cross-sectional profile is extracted from the flat
@@ -174,8 +179,6 @@ def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec,
         Number of spectral pixels.
     nspat : int
         Number of spatial pixels.
-    np : module
-        NumPy module reference.
     log : :class:`~pypeit.pypmsgs.PypeItLogger`
         Logger instance.
 
@@ -188,7 +191,7 @@ def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec,
         built.
     """
     nfibers = len(spat_ids)
-    profiles = []
+    profiles: list[np.ndarray] = []
 
     for i, spat_id in enumerate(spat_ids):
         # Full-width profile array for this fiber (indexed by spatial pixel)
@@ -224,12 +227,21 @@ def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec,
     return profiles
 
 
-def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
-                log, PypeItError, np, units, SkyCoord, fits,
-                sigma_clipped_stats, wcs, griddata):
+def _build_cube(spec2d_file: str, args: argparse.Namespace,
+                spectrograph: Spectrograph,
+                targetx: np.ndarray, targety: np.ndarray) -> None:
     """Build a single datacube from one spec2d file."""
     import os
 
+    import numpy as np
+    from astropy import units
+    from astropy.coordinates import SkyCoord
+    from astropy.io import fits
+    from astropy.stats import sigma_clipped_stats
+    from astropy import wcs
+    from scipy.interpolate import griddata
+
+    from pypeit import log, PypeItError
     from pypeit.spec2dobj import AllSpec2DObj
 
     allspec = AllSpec2DObj.from_fits(spec2d_file)
@@ -282,7 +294,7 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
             flatimg = _load_flat(spec2d, det_name, log)
             if flatimg is not None:
                 empirical_profiles = _build_empirical_profiles(
-                    flatimg, slitid_img, spat_ids, nspec, nspat, np, log)
+                    flatimg, slitid_img, spat_ids, nspec, nspat, log)
                 if empirical_profiles is not None:
                     log.info(f"    Built empirical extraction profiles "
                              f"from flat field")

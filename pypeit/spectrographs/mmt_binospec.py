@@ -1462,11 +1462,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         return xbins, ybins, spec_bins
 
     @staticmethod
-    def _ifu_calib_path():
+    def _ifu_calib_path() -> Path:
         """Return the path to the IFU calibration data directory."""
         return Path(__file__).resolve().parent.parent / 'data' / 'spectrographs' / 'mmt_binospec'
 
-    def load_fiber_ref_profile(self, det):
+    def load_fiber_ref_profile(self, det: int) -> fits.FITS_rec:
         """
         Load the reference fiber trace profile for fiber identification.
 
@@ -1492,7 +1492,7 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             data = hdu[ext].data.copy()
         return data
 
-    def load_sky_layout(self):
+    def load_sky_layout(self) -> tuple[np.ndarray, np.ndarray]:
         """
         Load the IFU fiber-to-sky position mapping.
 
@@ -1511,7 +1511,7 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             targety = data['TARGETY_ASEC'].copy()
         return targetx, targety
 
-    def load_fiber_illumination(self, det):
+    def load_fiber_illumination(self, det: int) -> np.ndarray:
         """
         Load the fiber-to-fiber illumination correction (throughput map).
 
@@ -1529,7 +1529,7 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             f_illum = hdu[1].data['F_ILLUM'][row].copy()
         return f_illum
 
-    def get_sky_fiber_mask(self, det, nslits):
+    def get_sky_fiber_mask(self, det: int, nslits: int) -> np.ndarray:
         """
         Return a boolean mask identifying which fiber/slit indices are
         dedicated sky fibers.
@@ -1561,7 +1561,8 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             sky_mask = np.pad(sky_mask, (0, nslits - nfibers), constant_values=False)
         return sky_mask
 
-    def get_science_fiber_layout_indices(self, det, nslits):
+    def get_science_fiber_layout_indices(self, det: int,
+                                         nslits: int) -> np.ndarray:
         """
         Map PypeIt slit indices to layout file indices for science fibers.
 
