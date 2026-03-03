@@ -85,9 +85,10 @@ dedicated ``pypeit_binospec_ifu_cube`` script, which implements the
 fiber-based datacube construction workflow:
 
 1. Extracts each fiber as a 1D spectrum from the spec2d files using
-   optimal (Horne 1986) profile-weighted extraction with a Gaussian
-   spatial profile derived from the slit edges, or boxcar summation
-   if ``--boxcar`` is specified
+   optimal (Horne 1986) profile-weighted extraction with an empirical
+   spatial profile measured from the flat field calibration (default),
+   a Gaussian profile (``--gaussian``), or boxcar summation
+   (``--boxcar``)
 2. Subtracts sky using PypeIt's per-fiber B-spline sky model from the
    spec2d file (default), or optionally using the 40 dedicated sky
    fibers per side (``--use_fibers``)
@@ -151,8 +152,14 @@ Command-line options
 ``--boxcar``
    Use boxcar (unweighted sum) extraction instead of the default
    optimal (Horne 1986) profile-weighted extraction.  Boxcar may be
-   preferable for extended sources that do not match the Gaussian
-   fiber profile.
+   preferable for extended sources that do not match the fiber profile.
+
+``--gaussian``
+   Use a Gaussian spatial profile for optimal extraction instead of
+   the default empirical profile measured from the flat field.  The
+   Gaussian width is derived from the slit edge traces.  This is also
+   the automatic fallback if the flat field calibration file cannot be
+   loaded.
 
 ``--method METHOD``
    Spatial interpolation method: ``nearest``, ``linear`` (default), or

@@ -44,6 +44,10 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         parser.add_argument('--boxcar', default=False, action='store_true',
                             help='Use boxcar extraction instead of optimal '
                                  '(profile-weighted) extraction')
+        parser.add_argument('--gaussian', default=False, action='store_true',
+                            help='Use Gaussian profile for optimal extraction '
+                                 'instead of the default empirical profile '
+                                 'measured from the flat field')
         parser.add_argument('--method', type=str, default='linear',
                             choices=['nearest', 'linear', 'cubic'],
                             help='Spatial interpolation method (default: linear)')
@@ -105,6 +109,121 @@ class BinospecIFUCube(scriptbase.ScriptBase):
                         sigma_clipped_stats, wcs, griddata)
 
 
+def _load_flat(spec2d, det_name, log):
+    """Load the flat field image associated with a Spec2DObj.
+
+    Parameters
+    ----------
+    spec2d : :class:`~pypeit.spec2dobj.Spec2DObj`
+        The spec2d object (for one detector).
+    det_name : str
+        Detector name, e.g. ``'DET01'``.
+    log : :class:`~pypeit.pypmsgs.PypeItLogger`
+        Logger instance.
+
+    Returns
+    -------
+    `numpy.ndarray`_ or None
+        The raw (unnormalized) pixel flat image, or None if unavailable.
+    """
+    from pathlib import Path
+    from pypeit.flatfield import FlatImages
+
+    if not hasattr(spec2d, 'calibs') or spec2d.calibs is None:
+        return None
+
+    calib_dir = spec2d.calibs.get('DIR')
+    flat_file = spec2d.calibs.get('FLAT')
+    if calib_dir is None or flat_file is None:
+        return None
+
+    flat_path = Path(calib_dir) / flat_file
+    if not flat_path.exists():
+        log.warning(f"    Flat field file not found: {flat_path}")
+        return None
+
+    try:
+        flatimages = FlatImages.from_file(str(flat_path))
+        if flatimages.pixelflat_raw is not None:
+            return flatimages.pixelflat_raw
+        log.warning(f"    pixelflat_raw is None in {flat_path}")
+        return None
+    except Exception as e:
+        log.warning(f"    Error loading flat field: {e}")
+        return None
+
+
+def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec,
+                              nspat, np, log):
+    """Build empirical spatial profiles for each fiber from the flat field.
+
+    For each fiber, the cross-sectional profile is extracted from the flat
+    field image by taking the median across all spectral rows (for robust
+    S/N), then normalizing to unit sum.  This captures the true fiber
+    spatial profile shape without assuming a functional form.
+
+    Parameters
+    ----------
+    flatimg : `numpy.ndarray`_
+        Raw (unnormalized) flat field image, shape ``(nspec, nspat)``.
+    slitid_img : `numpy.ndarray`_
+        Slit ID image from ``slits.slit_img(pad=0)``.
+    spat_ids : `numpy.ndarray`_
+        Array of spatial IDs for each fiber.
+    nspec : int
+        Number of spectral pixels.
+    nspat : int
+        Number of spatial pixels.
+    np : module
+        NumPy module reference.
+    log : :class:`~pypeit.pypmsgs.PypeItLogger`
+        Logger instance.
+
+    Returns
+    -------
+    list of `numpy.ndarray`_ or None
+        List of length ``nfibers``, where each element is a 1D array of
+        length ``nspat`` giving the normalized profile for that fiber
+        (zero outside the slit).  Returns None if profiles could not be
+        built.
+    """
+    nfibers = len(spat_ids)
+    profiles = []
+
+    for i, spat_id in enumerate(spat_ids):
+        # Full-width profile array for this fiber (indexed by spatial pixel)
+        prof = np.zeros(nspat)
+        onslit = slitid_img == spat_id
+        if not np.any(onslit):
+            profiles.append(prof)
+            continue
+
+        # For each spatial column that belongs to this fiber, take the
+        # median flat value across all spectral rows
+        cols = np.where(np.any(onslit, axis=0))[0]
+        for c in cols:
+            rows_on = onslit[:, c]
+            vals = flatimg[rows_on, c]
+            good = np.isfinite(vals) & (vals > 0)
+            if np.any(good):
+                prof[c] = np.median(vals[good])
+
+        # Normalize to sum=1
+        psum = np.sum(prof)
+        if psum > 0:
+            prof /= psum
+        profiles.append(prof)
+
+    # Sanity check: most fibers should have non-zero profiles
+    n_good = sum(1 for p in profiles if np.sum(p) > 0)
+    if n_good < nfibers * 0.5:
+        log.warning(f"    Only {n_good}/{nfibers} fibers have valid "
+                    f"empirical profiles")
+        return None
+
+    return profiles
+
+
 def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
                 log, PypeItError, np, units, SkyCoord, fits,
                 sigma_clipped_stats, wcs, griddata):
@@ -149,6 +268,31 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
         trace_centers = (left + right) / 2.0  # (nspec, nfibers)
         trace_sigma = (right - left) / (2.0 * 2.3548)  # FWHM -> sigma
 
+        # ----------------------------------------------------------
+        # Build extraction profiles: empirical from flat or Gaussian
+        # ----------------------------------------------------------
+        # empirical_profiles[i] is a 1D array giving the normalized
+        # spatial profile for fiber i, measured from the flat field.
+        # If the flat cannot be loaded, fall back to Gaussian.
+        empirical_profiles = None
+        use_gaussian = args.boxcar or args.gaussian
+
+        if not use_gaussian:
+            # Try to load the flat field from calibrations
+            flatimg = _load_flat(spec2d, det_name, log)
+            if flatimg is not None:
+                empirical_profiles = _build_empirical_profiles(
+                    flatimg, slitid_img, spat_ids, nspec, nspat, np, log)
+                if empirical_profiles is not None:
+                    log.info(f"    Built empirical extraction profiles "
+                             f"from flat field")
+                else:
+                    log.warning(f"    Failed to build empirical profiles, "
+                                f"falling back to Gaussian")
+            else:
+                log.warning(f"    Flat field not available, "
+                            f"falling back to Gaussian")
+
         fiber_flux = np.zeros((nfibers, nspec))
         fiber_ivar = np.zeros((nfibers, nspec))
         fiber_wave = np.zeros((nfibers, nspec))
@@ -156,8 +300,10 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
 
         if args.boxcar:
             log.info(f"    Using boxcar extraction")
+        elif empirical_profiles is not None:
+            log.info(f"    Using optimal extraction with empirical profiles")
         else:
-            log.info(f"    Using optimal (profile-weighted) extraction")
+            log.info(f"    Using optimal extraction with Gaussian profiles")
 
         for i, spat_id in enumerate(spat_ids):
             onslit = slitid_img == spat_id
@@ -186,17 +332,24 @@ def _build_cube(spec2d_file, args, spectrograph, targetx, targety,
                             1.0 / ivar_pix[good_ivar])
                 else:
                     # Optimal extraction (Horne 1986)
-                    # Build Gaussian profile at pixel positions
                     cols = np.where(pix)[0]
-                    sig = trace_sigma[row, i]
-                    if sig < 0.1:
-                        sig = 1.0  # fallback for bad trace
-                    cen = trace_centers[row, i]
-                    profile = np.exp(-0.5 * ((cols - cen) / sig) ** 2)
+
+                    if empirical_profiles is not None:
+                        # Empirical profile from flat field
+                        profile = empirical_profiles[i][cols]
+                    else:
+                        # Gaussian profile from trace geometry
+                        sig = trace_sigma[row, i]
+                        if sig < 0.1:
+                            sig = 1.0
+                        cen = trace_centers[row, i]
+                        profile = np.exp(
+                            -0.5 * ((cols - cen) / sig) ** 2)
+
                     psum = np.sum(profile)
                     if psum <= 0:
                         continue
-                    profile /= psum  # normalize to sum=1
+                    profile = profile / psum  # normalize to sum=1
 
                     iv = ivarraw[row, cols]
                     good_iv = iv > 0
