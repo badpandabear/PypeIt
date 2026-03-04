@@ -1262,10 +1262,16 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['scienceframe']['process']['use_biasimage'] = False
         par['scienceframe']['process']['use_darkimage'] = False
 
-        # Skip 1D extraction and object finding for IFU data — extraction
-        # is done manually after datacube construction
+        # Skip 1D extraction for IFU data — extraction is done during
+        # datacube construction by pypeit_binospec_ifu_cube.
         par['reduce']['extraction']['skip_extraction'] = True
+        # Object finding is unnecessary for fiber IFU data but PypeIt has
+        # no skip_objfind parameter, so we minimize the work instead.
+        # TODO: add a skip_objfind parameter to PypeIt to avoid the
+        # overhead of running object finding on ~360 fibers per detector.
         par['reduce']['findobj']['skip_skysub'] = True
+        par['reduce']['findobj']['skip_second_find'] = True
+        par['reduce']['findobj']['skip_final_global'] = True
         par['reduce']['findobj']['snr_thresh'] = 1000.0
 
         # NOTE: Binospec IFU is fiber-fed, not slicer-based. Ideally
