@@ -178,3 +178,16 @@ Typical output dimensions for the default spatial scale are approximately
 63 x 47 spatial pixels, with the number of wavelength pixels depending
 on the grating and wavelength coverage.
 
+.. note::
+
+   The datacube construction can be sped up significantly by using an
+   accelerated BLAS library.  On macOS (13.3+), switching to Apple's
+   ``newaccelerate`` backend yielded a ~3x speedup.  See the
+   `conda-forge BLAS documentation
+   <https://conda-forge.org/docs/maintainer/knowledge_base/#switching-blas-implementation>`__
+   for instructions on selecting a BLAS implementation with conda, e.g.:
+
+   .. code-block:: bash
+
+      conda install "libblas=*=*newaccelerate"
+
