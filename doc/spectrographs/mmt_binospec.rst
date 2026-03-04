@@ -126,10 +126,6 @@ Command-line options
 
    pypeit_binospec_ifu_cube spec2d_*.fits [options]
 
-``--det DET01 DET02``
-   Detector(s) to process.  Default is both ``DET01`` and ``DET02``.
-   Use ``--det DET01`` to process only side A.
-
 ``--output FILENAME``
    Output FITS filename.  Only valid when processing a single input
    file.  Default is auto-generated from the input filename

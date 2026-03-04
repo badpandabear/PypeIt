@@ -41,8 +41,6 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         parser.add_argument('files', type=str, nargs='+',
                             help='One or more PypeIt spec2d files, or a text file '
                                  'listing spec2d files (one per line)')
-        parser.add_argument('--det', type=str, nargs='+', default=['DET01', 'DET02'],
-                            help='Detector(s) to process (default: DET01 DET02)')
         parser.add_argument('-o', '--output', type=str, default=None,
                             help='Output FITS filename (only valid for a single '
                                  'input file; default: auto-generated)')
@@ -251,7 +249,7 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
     # ------------------------------------------------------------------
     det_fiber_data = {}
 
-    for det_name in args.det:
+    for det_name in ['DET01', 'DET02']:
         if det_name not in allspec.detectors:
             log.warning(f"Detector {det_name} not found in "
                         f"{os.path.basename(spec2d_file)}, skipping")
