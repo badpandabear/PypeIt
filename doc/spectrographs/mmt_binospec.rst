@@ -72,7 +72,7 @@ are processed and written to separate spec2d output files.
 
 .. code-block:: bash
 
-   pypeit_setup -r /path/to/raw -s mmt_binospec_ifu -b
+   pypeit_setup -r /path/to/raw -s mmt_binospec_ifu -c all
    run_pypeit mmt_binospec_ifu_A/mmt_binospec_ifu_A.pypeit
 
 Producing datacubes
