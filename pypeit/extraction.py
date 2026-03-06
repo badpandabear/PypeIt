@@ -951,3 +951,258 @@ class SlicerIFUExtract(MultiSlitExtract):
     #def __init__(self, sciImg, slits, sobjs_obj, spectrograph, par, objtype, **kwargs):
     #    # IFU doesn't extract, and there's no need for a super call here.
     #    return
+
+
+class FiberExtract(Extract):
+    """
+    Child of Extract for fiber-fed spectrographs.
+
+    Extracts 1D spectra from each fiber using boxcar and optimal (Horne 1986)
+    extraction. Skips local sky subtraction — the global sky model is used
+    directly.
+
+    See parent doc string for Args and Attributes.
+    """
+    def __init__(self, sciImg, slits, sobjs_obj, spectrograph, par, objtype, **kwargs):
+        super().__init__(sciImg, slits, sobjs_obj, spectrograph, par, objtype, **kwargs)
+
+    def local_skysub_extract(self, global_sky, sobjs, bkg_redux_global_sky=None,
+                             spat_pix=None, model_noise=True,
+                             show_resids=False, show_profile=False, show=False):
+        """
+        Extract fiber spectra without local sky subtraction.
+
+        Performs boxcar and optimal (Horne 1986) extraction for each fiber
+        using the global sky model directly.
+
+        Args:
+            global_sky (`numpy.ndarray`_):
+                Global sky model.
+            sobjs (:class:`~pypeit.specobjs.SpecObjs`):
+                Objects to extract (one per fiber from FiberFindObjects).
+            bkg_redux_global_sky (`numpy.ndarray`_, optional):
+                Sky estimate without background subtraction.
+            spat_pix (`numpy.ndarray`_, optional):
+                Image containing the spatial location of pixels.
+            model_noise (:obj:`bool`, optional):
+                Not used for fiber extraction.
+            show_resids (:obj:`bool`, optional):
+                Not used for fiber extraction.
+            show_profile (:obj:`bool`, optional):
+                Not used for fiber extraction.
+            show (:obj:`bool`, optional):
+                Show debugging plots.
+
+        Returns:
+            :obj:`tuple`: skymodel, bkg_redux_skymodel, objmodel, ivarmodel,
+            outmask, sobjs
+        """
+        self.global_sky = global_sky
+        nspec, nspat = self.sciImg.image.shape
+
+        # Get the good slits
+        gdslits = np.where(np.logical_not(self.extract_bpm))[0]
+
+        # Initialize output arrays
+        self.outmask = self.sciImg.fullmask.copy()
+        self.extractmask = self.sciImg.select_flag(invert=True)
+        self.objmodel = np.zeros_like(self.sciImg.image)
+        self.skymodel = np.copy(self.global_sky)
+        self.bkg_redux_skymodel = bkg_redux_global_sky.copy() \
+            if bkg_redux_global_sky is not None else None
+        self.ivarmodel = np.copy(self.sciImg.ivar)
+        self.sobjs = sobjs.copy()
+
+        # Build slit ID image and empirical profiles
+        slitid_img = self.slits.slit_img(pad=0, flexure=self.spat_flexure_shift)
+        empirical_profiles = None
+        if self.flatimg is not None:
+            empirical_profiles = self._build_empirical_profiles(
+                self.flatimg, slitid_img, self.slits.spat_id, nspec, nspat)
+
+        # Science image minus sky
+        imgminsky = self.sciImg.image - global_sky
+        inmask = self.sciImg.select_flag(invert=True)
+
+        # Extract sky to use for BOX_COUNTS_SKY (use bkg_redux sky if available)
+        extract_sky = global_sky if bkg_redux_global_sky is None \
+            else bkg_redux_global_sky
+
+        for sobj in self.sobjs:
+            thismask = self.slitmask == sobj.SLITID
+            sobj_inmask = inmask & thismask
+
+            # Boxcar extraction using existing infrastructure
+            extract.extract_boxcar(
+                imgminsky, self.sciImg.ivar, sobj_inmask,
+                self.waveimg, extract_sky, sobj,
+                fwhmimg=self.fwhmimg, flatimg=self.flatimg,
+                base_var=self.sciImg.base_var,
+                count_scale=self.sciImg.img_scale,
+                noise_floor=self.sciImg.noise_floor)
+
+            # Optimal extraction (Horne 1986)
+            self._optimal_extract_fiber(
+                sobj, slitid_img, inmask, global_sky,
+                empirical_profiles)
+
+        # Set the bit for pixels masked by extraction
+        base_gpm = self.sciImg.select_flag(invert=True)
+        self.outmask.turn_on('EXTRACT',
+                             select=base_gpm & np.logical_not(self.extractmask))
+
+        # Step
+        self.steps.append(inspect.stack()[0][3])
+
+        if show:
+            self.show('local', sobjs=self.sobjs, slits=True)
+            self.show('resid', sobjs=self.sobjs, slits=True)
+
+        return self.skymodel, self.bkg_redux_skymodel, self.objmodel, \
+            self.ivarmodel, self.outmask, self.sobjs
+
+    @staticmethod
+    def _build_empirical_profiles(flatimg, slitid_img, spat_ids, nspec, nspat):
+        """Build empirical spatial profiles for each fiber from the flat field.
+
+        For each fiber, the cross-sectional profile is extracted from the flat
+        field image by taking the median across all spectral rows, then
+        normalizing to unit sum.
+
+        Parameters
+        ----------
+        flatimg : `numpy.ndarray`_
+            Raw (unnormalized) flat field image, shape ``(nspec, nspat)``.
+        slitid_img : `numpy.ndarray`_
+            Slit ID image from ``slits.slit_img(pad=0)``.
+        spat_ids : `numpy.ndarray`_
+            Array of spatial IDs for each fiber.
+        nspec : int
+            Number of spectral pixels.
+        nspat : int
+            Number of spatial pixels.
+
+        Returns
+        -------
+        :obj:`dict` or None
+            Dictionary mapping spat_id to 1D profile array of length
+            ``nspat``.  Returns None if too few fibers have valid profiles.
+        """
+        profiles = {}
+        n_good = 0
+
+        for spat_id in spat_ids:
+            prof = np.zeros(nspat)
+            onslit = slitid_img == spat_id
+            if not np.any(onslit):
+                profiles[spat_id] = prof
+                continue
+
+            cols = np.where(np.any(onslit, axis=0))[0]
+            for c in cols:
+                rows_on = onslit[:, c]
+                vals = flatimg[rows_on, c]
+                good = np.isfinite(vals) & (vals > 0)
+                if np.any(good):
+                    prof[c] = np.median(vals[good])
+
+            psum = np.sum(prof)
+            if psum > 0:
+                prof /= psum
+                n_good += 1
+            profiles[spat_id] = prof
+
+        if n_good < len(spat_ids) * 0.5:
+            log.warning(f"Only {n_good}/{len(spat_ids)} fibers have valid "
+                        f"empirical profiles — falling back to Gaussian")
+            return None
+
+        return profiles
+
+    def _optimal_extract_fiber(self, sobj, slitid_img, inmask, skymodel,
+                               empirical_profiles):
+        """Perform Horne (1986) optimal extraction for a single fiber.
+
+        Sets OPT_WAVE, OPT_COUNTS, OPT_COUNTS_IVAR, OPT_MASK,
+        OPT_COUNTS_SKY, OPT_COUNTS_SIG on the SpecObj.
+
+        Parameters
+        ----------
+        sobj : :class:`~pypeit.specobj.SpecObj`
+            The SpecObj for this fiber. Modified in place.
+        slitid_img : `numpy.ndarray`_
+            Slit ID image.
+        inmask : `numpy.ndarray`_
+            Good pixel mask (True = good).
+        skymodel : `numpy.ndarray`_
+            Sky model image.
+        empirical_profiles : :obj:`dict` or None
+            Dictionary of empirical profiles keyed by spat_id, or None
+            to use Gaussian profiles.
+        """
+        nspec, nspat = self.sciImg.image.shape
+        onslit = slitid_img == sobj.SLITID
+        good = onslit & inmask
+
+        # Compute trace geometry for Gaussian fallback
+        slit_idx = np.where(self.slits.spat_id == sobj.SLITID)[0][0]
+        left = self.slits_left[:, slit_idx]
+        right = self.slits_right[:, slit_idx]
+        trace_center = (left + right) / 2.0
+        trace_sigma = (right - left) / (2.0 * 2.3548)  # FWHM -> sigma
+
+        opt_flux = np.zeros(nspec)
+        opt_ivar = np.zeros(nspec)
+        opt_wave = np.zeros(nspec)
+        opt_sky = np.zeros(nspec)
+        opt_mask = np.zeros(nspec, dtype=bool)
+
+        for row in range(nspec):
+            pix = good[row, :]
+            if not np.any(pix):
+                continue
+
+            cols = np.where(pix)[0]
+            opt_wave[row] = np.median(self.waveimg[row, cols])
+
+            if empirical_profiles is not None:
+                profile = empirical_profiles[sobj.SLITID][cols]
+            else:
+                sig = trace_sigma[row]
+                if sig < 0.1:
+                    sig = 1.0
+                cen = trace_center[row]
+                profile = np.exp(-0.5 * ((cols - cen) / sig) ** 2)
+
+            psum = np.sum(profile)
+            if psum <= 0:
+                continue
+            profile = profile / psum
+
+            iv = self.sciImg.ivar[row, cols]
+            good_iv = iv > 0
+            if not np.any(good_iv):
+                continue
+
+            # Horne Eq. 8: flux = sum(P * ivar * data) / sum(P^2 * ivar)
+            denom = np.sum(profile[good_iv] ** 2 * iv[good_iv])
+            if denom <= 0:
+                continue
+
+            imgminsky_row = self.sciImg.image[row, cols] - skymodel[row, cols]
+            opt_flux[row] = np.sum(
+                profile[good_iv] * iv[good_iv]
+                * imgminsky_row[good_iv]) / denom
+            opt_sky[row] = np.sum(
+                profile[good_iv] * iv[good_iv]
+                * skymodel[row, cols[good_iv]]) / denom
+            # Horne Eq. 9: var = sum(P) / sum(P^2 * ivar)
+            opt_ivar[row] = denom / np.sum(profile[good_iv])
+            opt_mask[row] = True
+
+        sobj.OPT_WAVE = opt_wave
+        sobj.OPT_COUNTS = opt_flux
+        sobj.OPT_COUNTS_IVAR = opt_ivar
+        sobj.OPT_COUNTS_SIG = np.sqrt(utils.inverse(opt_ivar))
+        sobj.OPT_MASK = opt_mask
+        sobj.OPT_COUNTS_SKY = opt_sky

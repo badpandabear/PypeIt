@@ -13,6 +13,7 @@ import os
 from astropy import stats
 from abc import ABCMeta
 
+from pypeit import specobj
 from pypeit import specobjs
 from pypeit import log, utils
 from pypeit import PypeItError
@@ -1302,3 +1303,158 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
         if np.any(_bpm):
             self.sciImg.update_mask('BADSCALE', indx=_bpm)
         self.sciImg.ivar = utils.inverse(varImg)
+
+
+class FiberFindObjects(SlicerIFUFindObjects):
+    """
+    Child of FindObjects for fiber-fed spectrographs.
+
+    For fiber spectrographs, each fiber IS the object — there is no need
+    for peak-detection object finding. This class creates one SpecObj per
+    fiber with the trace set to the fiber center (from slit edges).
+
+    The global sky subtraction is inherited from
+    :class:`SlicerIFUFindObjects`, which handles joint sky fitting across
+    all fibers.
+
+    See parent doc string for Args and Attributes.
+    """
+    def __init__(self, sciImg, slits, spectrograph, par, objtype, **kwargs):
+        super().__init__(sciImg, slits, spectrograph, par, objtype, **kwargs)
+
+    def run(self, std_trace=None, show_peaks=False, show_skysub_fit=False):
+        """
+        Primary code flow for fiber object finding.
+
+        For fiber spectrographs, object finding does not depend on the
+        sky-subtracted image (each fiber IS the object), so we perform a
+        single global sky subtraction pass and then create the fiber
+        objects.  This avoids the two-pass sky/object-finding loop of
+        the base class.
+
+        Parameters
+        ----------
+        std_trace : `astropy.table.Table`_, optional
+            Ignored for fiber reductions.
+        show_peaks : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        show_skysub_fit : :obj:`bool`, optional
+            Show the fits for the global sky subtraction.
+
+        Returns
+        -------
+        initial_sky : `numpy.ndarray`_
+            Global sky model.
+        sobjs_obj : :class:`~pypeit.specobjs.SpecObjs`
+            List of objects found (one per fiber).
+        """
+        # Perform global sky subtraction (joint fit across all fibers)
+        initial_sky = self.global_skysub(skymask=self.initial_skymask,
+                                         update_crmask=False,
+                                         objs_not_masked=True,
+                                         show_fit=show_skysub_fit)
+
+        # Reset reduce_bpm: the per-slit sky sub step (which runs inside
+        # global_skysub before the joint fit) rejects narrow fibers as
+        # "bad sky fit" and sets reduce_bpm=True.  The joint fit across
+        # dedicated sky fibers succeeds and produces a valid sky model,
+        # so we need all fibers available for object creation.
+        self.reduce_bpm = self.reduce_bpm_init.copy()
+
+        # Create one SpecObj per fiber from slit edges
+        sobjs_obj, self.nobj = self.find_objects(
+            self.sciImg.image - initial_sky, self.sciImg.ivar,
+            std_trace=std_trace, show=self.findobj_show,
+            show_peaks=show_peaks)
+
+        return initial_sky, sobjs_obj
+
+    def find_objects_pypeline(self, image, ivar, std_trace=None,
+                              manual_extract_dict=None,
+                              show_peaks=False, show_fits=False, show_trace=False,
+                              show=False, save_objfindQA=False, neg=False, debug=False):
+        """
+        Create one SpecObj per fiber from known slit edges.
+
+        Instead of running peak-detection object finding, this method
+        creates a single object per fiber with the trace set to the
+        center of each slit (fiber).
+
+        Parameters
+        ----------
+        image : `numpy.ndarray`_
+            Image to search for objects from. Shape ``(nspec, nspat)``.
+        ivar : `numpy.ndarray`_
+            Inverse variance of ``image``.
+        std_trace : `astropy.table.Table`_, optional
+            Ignored for fiber reductions.
+        manual_extract_dict : :obj:`dict`, optional
+            Ignored for fiber reductions.
+        show_peaks : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        show_fits : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        show_trace : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        show : :obj:`bool`, optional
+            Show QA plots.
+        save_objfindQA : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        neg : :obj:`bool`, optional
+            Ignored for fiber reductions.
+        debug : :obj:`bool`, optional
+            Ignored for fiber reductions.
+
+        Returns
+        -------
+        sobjs : :class:`~pypeit.specobjs.SpecObjs`
+            Container holding one SpecObj per fiber.
+        nobj : :obj:`int`
+            Number of objects identified.
+        """
+        gdslits = np.where(np.logical_not(self.reduce_bpm))[0]
+        sobjs = specobjs.SpecObjs()
+        nspec = image.shape[0]
+
+        boxcar_rad = self.par['reduce']['extraction']['boxcar_radius'] \
+            / self.get_platescale()
+
+        for slit_idx in gdslits:
+            slit_spat_id = self.slits.spat_id[slit_idx]
+
+            # Fiber center trace from slit edges
+            left = self.slits_left[:, slit_idx]
+            right = self.slits_right[:, slit_idx]
+            trace_center = (left + right) / 2.0
+            fiber_half_width = np.median((right - left) / 2.0)
+
+            # Create SpecObj for this fiber
+            thisobj = specobj.SpecObj(
+                PYPELINE='Fiber',
+                DET=self.sciImg.detector.name,
+                OBJTYPE=self.objtype,
+                SLITID=slit_spat_id,
+            )
+            thisobj.TRACE_SPAT = trace_center
+            thisobj.trace_spec = np.arange(nspec)
+            thisobj.SPAT_PIXPOS = np.median(trace_center)
+            thisobj.SPAT_PIXPOS_ID = int(np.rint(thisobj.SPAT_PIXPOS))
+            thisobj.SPAT_FRACPOS = 0.5  # centered in fiber
+            thisobj.FWHM = 2.0 * fiber_half_width
+            thisobj.maskwidth = 1.0  # use full fiber width
+            thisobj.BOX_R_PIX = min(fiber_half_width, boxcar_rad)
+            thisobj.smash_peakflux = 1.0
+            thisobj.smash_snr = 100.0
+            thisobj.OBJID = slit_idx + 1
+            thisobj.set_name()
+
+            sobjs.add_sobj(thisobj)
+
+        # Steps
+        self.steps.append(inspect.stack()[0][3])
+        if show:
+            gpm = self.sciImg.select_flag(invert=True)
+            self.show('image', image=image*gpm.astype(float),
+                      chname='objfind', sobjs=sobjs, slits=True)
+
+        return sobjs, len(sobjs)

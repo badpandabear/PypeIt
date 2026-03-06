@@ -1258,6 +1258,13 @@ class FlatField:
 
             poly_basis = basis.fpoly(2.0*twod_spat_coo_data - 1.0, npoly)
 
+            if not np.any(twod_gpm_data):
+                log.warning('No valid data for 2D flat-field fit on slit {0}!  '
+                          'Skipping 2D correction.'.format(slit_spat))
+                self.slits.mask[slit_idx] = self.slits.bitmask.turn_on(
+                    self.slits.mask[slit_idx], 'BADFLATCALIB')
+                continue
+
             # Perform the full 2d fit
             twod_bspl, twod_gpm_fit, twod_flat_fit, _, exit_status \
                     = fitting.bspline_profile(twod_spec_coo_data, twod_flat_data, twod_ivar_data,

@@ -38,7 +38,7 @@ class SpecObj(datamodel.DataContainer):
     Args:
         PYPELINE (:obj:`str`):
             Name of the ``PypeIt`` pipeline method.  Allowed options are
-            MultiSlit, Echelle, or SlicerIFU.
+            MultiSlit, Echelle, SlicerIFU, or Fiber.
         DET (:obj:`str`):
             The name of the detector or mosaic from which the spectrum was
             extracted.  For example, DET01.
@@ -293,7 +293,7 @@ class SpecObj(datamodel.DataContainer):
         """
         Validate the object.
         """
-        pypelines = ['MultiSlit', 'SlicerIFU', 'Echelle']
+        pypelines = ['MultiSlit', 'SlicerIFU', 'Echelle', 'Fiber']
         if self.PYPELINE not in pypelines:
             raise PypeItError(f'{self.PYPELINE} is not a known pipeline procedure.  Options are: '
                        f"{', '.join(pypelines)}")
@@ -336,9 +336,7 @@ class SpecObj(datamodel.DataContainer):
     def slit_order(self):
         if self.PYPELINE == 'Echelle':
             return self.ECH_ORDER
-        elif self.PYPELINE == 'MultiSlit':
-            return self.SLITID
-        elif self.PYPELINE == 'SlicerIFU':
+        elif self.PYPELINE in ['MultiSlit', 'SlicerIFU', 'Fiber']:
             return self.SLITID
         else:
             raise PypeItError("Bad PYPELINE")
@@ -348,9 +346,7 @@ class SpecObj(datamodel.DataContainer):
     def slit_orderindx(self):
         if self.PYPELINE == 'Echelle':
             return self.ECH_ORDERINDX
-        elif self.PYPELINE == 'MultiSlit':
-            return self.SLITID
-        elif self.PYPELINE == 'SlicerIFU':
+        elif self.PYPELINE in ['MultiSlit', 'SlicerIFU', 'Fiber']:
             return self.SLITID
         else:
             raise PypeItError("Bad PYPELINE")
@@ -482,7 +478,7 @@ class SpecObj(datamodel.DataContainer):
             name += '{:04d}'.format(self.ECH_ORDER)
             self.ECH_NAME = ech_name
             self.NAME = name
-        elif self.PYPELINE in ['MultiSlit', 'SlicerIFU']:
+        elif self.PYPELINE in ['MultiSlit', 'SlicerIFU', 'Fiber']:
             # Spat
             name = naming_model['spat']
             if self['SPAT_PIXPOS_ID'] is None:

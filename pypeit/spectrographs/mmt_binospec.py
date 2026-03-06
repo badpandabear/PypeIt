@@ -1111,7 +1111,7 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
     sub-bundle (indices [0-7, 88-95, 176-183, 264-271, 352-359]).
     """
     name = 'mmt_binospec_ifu'
-    pypeline = 'SlicerIFU'
+    pypeline = 'Fiber'
     supported = True
 
     # IFU fiber geometry constants
@@ -1149,11 +1149,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         Define how metadata are derived from the spectrograph files.
 
         Extends the parent class metadata with IFU-specific fields
-        required by the SlicerIFU pipeline (atmospheric parameters
+        required by the Fiber pipeline (atmospheric parameters
         for DAR correction).
         """
         super().init_meta()
-        # IFU-specific metadata for SlicerIFU pipeline
+        # IFU-specific metadata for Fiber pipeline
         self.meta['slitwid'] = dict(card=None, compound=True)
         self.meta['obstime'] = dict(card=None, compound=True, required=False)
         self.meta['pressure'] = dict(card=None, compound=True, required=False)
@@ -1199,19 +1199,19 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
                 return 730.0
         elif meta_key == 'temperature':
             try:
-                return headarr[1]['TEMPERAT']
+                return headarr[1]['TEMP']
             except KeyError:
                 log.warning("Temperature not in header - using default (5 deg C)")
                 return 5.0
         elif meta_key == 'humidity':
             try:
-                return headarr[1]['HUMIDITY']
+                return headarr[1]['HUMID']
             except KeyError:
                 log.warning("Humidity not in header - using default (20%%)")
                 return 20.0
         elif meta_key == 'parangle':
             try:
-                return headarr[1]['PARANGLE'] * np.pi / 180.0
+                return headarr[1]['PA'] * np.pi / 180.0
             except KeyError:
                 log.warning("Parallactic angle not in header - using default (0)")
                 return 0.0
@@ -1262,25 +1262,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['scienceframe']['process']['use_biasimage'] = False
         par['scienceframe']['process']['use_darkimage'] = False
 
-        # Skip 1D extraction for IFU data — extraction is done during
-        # datacube construction by pypeit_binospec_ifu_cube.
-        par['reduce']['extraction']['skip_extraction'] = True
-        # Object finding is unnecessary for fiber IFU data but PypeIt has
-        # no skip_objfind parameter, so we minimize the work instead.
-        # TODO: add a skip_objfind parameter to PypeIt to avoid the
-        # overhead of running object finding on ~360 fibers per detector.
-        par['reduce']['findobj']['skip_skysub'] = True
+        # FiberFindObjects creates one SpecObj per fiber from slit edges
+        # (no peak detection needed) and handles sky subtraction in its
+        # own run() method, so skip the second find and final global.
         par['reduce']['findobj']['skip_second_find'] = True
         par['reduce']['findobj']['skip_final_global'] = True
-        par['reduce']['findobj']['snr_thresh'] = 1000.0
-
-        # NOTE: Binospec IFU is fiber-fed, not slicer-based. Ideally
-        # slit_spec=False, but that code path is not yet implemented in
-        # PypeIt's coadd3d. Using slit_spec=True for now to leverage the
-        # existing SlicerIFU infrastructure (treating each fiber as a
-        # narrow slit). Future work should implement the fiber-based path.
-        par['reduce']['cube']['slit_spec'] = True
-        par['reduce']['cube']['combine'] = False
 
         # Sky subtraction: use joint fit across all fibers
         par['reduce']['skysub']['no_poly'] = True
@@ -1312,9 +1298,9 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['calibrations']['tilts']['spat_order'] = 1
         par['calibrations']['tilts']['spec_order'] = 1
 
-        # Flexure: use slit centers since no objects are extracted
-        par['flexure']['spec_method'] = 'slitcen'
-        par['flexure']['spec_maxshift'] = 3
+        # Flexure: Binospec has active flexure control, so spectral
+        # flexure correction is not needed for IFU mode
+        par['flexure']['spec_method'] = 'skip'
 
         # Flux calibration: extinction correction is done during datacube
         # construction, not during 1D extraction

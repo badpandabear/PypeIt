@@ -485,7 +485,7 @@ class Spectrograph:
 
         # The following are added for SlicerIFU spectrographs, as they are
         #   needed by the coadd3d routine
-        if self.pypeline == "SlicerIFU":
+        if self.pypeline in ["SlicerIFU", "Fiber"]:
             slicer_keys = [
                 "slitwid", "airmass", "parangle", "pressure", "temperature", "humidity"
             ]

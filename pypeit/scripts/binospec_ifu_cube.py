@@ -483,6 +483,10 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
         if np.any(valid):
             all_waves.extend([np.min(wave[valid]), np.max(wave[valid])])
 
+    if len(all_waves) == 0:
+        log.error("No valid wavelength data found in any detector. "
+                  "Check that spec2d files contain extracted fiber spectra.")
+        return
     wave_min = min(all_waves[::2])
     wave_max = max(all_waves[1::2])
 
