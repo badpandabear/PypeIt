@@ -1554,56 +1554,88 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         return sky_mask
 
     def get_science_fiber_layout_indices(self, det: int,
-                                         nslits: int) -> np.ndarray:
+                                         fiber_ids: np.ndarray,
+                                         fiber_types: np.ndarray) -> np.ndarray:
         """
-        Map PypeIt slit indices to layout file indices for science fibers.
+        Map detected fibers to layout file indices using fiber IDs.
 
-        The layout file (``bino_IFU_sky_layout.fits``) contains 640 entries:
-        indices 0-319 for side A science fibers and 320-639 for side B.
-        This method maps each PypeIt slit/fiber index to the corresponding
-        layout file index, using sequential mapping after removing sky
-        fiber indices.
+        Uses fiber IDs from :func:`get_fiber_metadata` to look up each
+        fiber's name in the reference profile, then matches that name to
+        the layout file entry.  This works correctly even when fibers are
+        missing from the input data.
 
-        Side B (det 2) fibers are mapped in reverse order because the two
-        Binospec detectors produce mirror-image spectra: on side A the
-        first science fiber (leftmost on detector) corresponds to the
-        highest X on sky, while on side B the first science fiber
-        (leftmost on detector) corresponds to the most negative X on sky.
-        The layout file stores side B entries with X increasing (entry 320
-        is most negative X, entry 639 is least negative X), so side B
-        detector order must be reversed to match.
+        The layout file (``bino_IFU_sky_layout.fits``) contains 640 entries
+        (indices 0-319 for side A, 320-639 for side B).  Live science
+        fibers from the reference profile are sorted by detector position
+        and paired with live layout entries: in forward order for side A,
+        and in reverse order for side B (because the two detectors produce
+        mirror-image spectra).  Dead fibers (``_DEAD`` suffix) are excluded
+        from both lists so they do not disrupt the pairing.
 
         Args:
             det (:obj:`int`):
                 1-indexed detector number (1=side A, 2=side B).
-            nslits (:obj:`int`):
-                Total number of detected fiber traces (slits).
+            fiber_ids (`numpy.ndarray`_):
+                Physical fiber IDs for each detected fiber, from
+                ``fiber_meta['fiber_id']``.  Unmatched fibers have ID < 0.
+            fiber_types (`numpy.ndarray`_):
+                Fiber type strings (``'SCI'``, ``'SKY'``, or ``'UNKNOWN'``),
+                from ``fiber_meta['fiber_type']``.
 
         Returns:
-            `numpy.ndarray`_: Array of shape ``(nslits,)`` with layout file
-            indices (0-639) for each slit. Sky fibers are assigned -1.
+            `numpy.ndarray`_: Array of shape ``(nfibers,)`` with layout file
+            indices (0-639) for each fiber. Sky, dead, and unmatched fibers
+            are assigned -1.
         """
-        sky_mask = self.get_sky_fiber_mask(det, nslits)
-        layout_indices = np.full(nslits, -1, dtype=int)
-        n_sci = int(np.sum(~sky_mask))
+        ref = self.load_fiber_ref_profile(det)
+        ref_ids = ref['FIB_ID']
+        ref_names = np.char.strip(ref['FIB_NAME'])
+        ref_pix = ref['TR_PIX']
 
-        # Layout file offset: 0 for side A (det 1), 320 for side B (det 2)
-        offset = 0 if det == 1 else 320
+        # Identify live science fibers in the reference profile and sort
+        # by detector position (TR_PIX).
+        ref_is_sci = np.array([not n.startswith('SKY') for n in ref_names])
+        ref_is_live = np.array(['_DEAD' not in n for n in ref_names])
+        ref_live_sci = ref_is_sci & ref_is_live
+        live_sci_ids = ref_ids[ref_live_sci]
+        live_sci_pix = ref_pix[ref_live_sci]
+        sort_idx = np.argsort(live_sci_pix)
+        live_sci_ids_sorted = live_sci_ids[sort_idx]
 
-        # Science fibers map sequentially to layout entries.
-        # Side A: forward order (detector left = layout 0).
-        # Side B: reverse order (detector left = layout 320 + n_sci - 1).
-        sci_counter = 0
-        for i in range(nslits):
-            if not sky_mask[i]:
-                if det == 1:
-                    layout_indices[i] = offset + sci_counter
-                else:
-                    layout_indices[i] = offset + (n_sci - 1 - sci_counter)
-                sci_counter += 1
+        # Get live layout entries for this side in layout-file order.
+        sky_file = self._ifu_calib_path() / 'bino_IFU_sky_layout.fits'
+        with fits.open(sky_file) as hdu:
+            layout_names = [n.strip() for n in hdu[1].data[0]['TARGET_NAME']]
+        start, end = (0, 320) if det == 1 else (320, 640)
+        live_layout_indices = [i for i in range(start, end)
+                               if '_DEAD' not in layout_names[i]]
 
-        log.info(f"Mapped {sci_counter} science fibers to layout indices "
-                 f"(det={det}, offset={offset})")
+        # Pair reference fibers (by detector position) with layout entries.
+        # Side A: forward (leftmost on detector = first layout entry).
+        # Side B: reversed (leftmost on detector = last layout entry)
+        # because the two detectors produce mirror-image spectra.
+        n_map = min(len(live_sci_ids_sorted), len(live_layout_indices))
+        id_to_layout = {}
+        for rank in range(n_map):
+            fid = int(live_sci_ids_sorted[rank])
+            if det == 1:
+                id_to_layout[fid] = live_layout_indices[rank]
+            else:
+                id_to_layout[fid] = live_layout_indices[n_map - 1 - rank]
+
+        nfibers = len(fiber_ids)
+        layout_indices = np.full(nfibers, -1, dtype=int)
+
+        for i in range(nfibers):
+            if fiber_types[i] == 'SKY' or fiber_ids[i] < 0:
+                continue
+            layout_idx = id_to_layout.get(int(fiber_ids[i]), -1)
+            if layout_idx >= 0:
+                layout_indices[i] = layout_idx
+
+        n_mapped = int(np.sum(layout_indices >= 0))
+        log.info(f"Mapped {n_mapped} science fibers to layout indices "
+                 f"(det={det})")
         return layout_indices
 
     def match_fibers_to_reference(self, det, detected_positions):

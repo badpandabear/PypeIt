@@ -571,13 +571,22 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     for det_name, data in det_fiber_data.items():
         det_num = int(det_name.replace('DET', ''))
         nfibers = data['flux'].shape[0]
-        f_illum = spectrograph.load_fiber_illumination(det_num)
-        # Truncate or pad to match number of detected fibers
-        if len(f_illum) > nfibers:
-            f_illum = f_illum[:nfibers]
-        elif len(f_illum) < nfibers:
-            f_illum = np.pad(f_illum, (0, nfibers - len(f_illum)),
-                             constant_values=1.0)
+        f_illum_all = spectrograph.load_fiber_illumination(det_num)
+
+        # Map each detected fiber to its reference profile index via fiber ID
+        fiber_meta = data['fiber_meta']
+        ref = spectrograph.load_fiber_ref_profile(det_num)
+        ref_ids = ref['FIB_ID']
+
+        f_illum = np.ones(nfibers)
+        for i in range(nfibers):
+            fid = fiber_meta['fiber_id'][i]
+            if fid < 0:
+                continue
+            idx = np.where(ref_ids == fid)[0]
+            if len(idx) > 0 and idx[0] < len(f_illum_all):
+                f_illum[i] = f_illum_all[idx[0]]
+
         # Avoid division by zero for dead fibers
         good = f_illum > 0.1
         log.info(f"  {det_name}: applying fiber illumination correction "
@@ -723,8 +732,9 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
         det_num = int(det_name.replace('DET', ''))
 
         sci_mask = data['sci_mask']
+        fiber_meta = data['fiber_meta']
         layout_indices = spectrograph.get_science_fiber_layout_indices(
-            det_num, len(sci_mask))
+            det_num, fiber_meta['fiber_id'], fiber_meta['fiber_type'])
 
         sci_flux = data['flux_resamp'][sci_mask]
         sci_ivar = data['ivar_resamp'][sci_mask]

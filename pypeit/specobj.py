@@ -448,6 +448,13 @@ class SpecObj(datamodel.DataContainer):
               number, and ``{DET}`` is the string identifier for the detector or
               mosaic.
 
+            - For Fiber data, the name is
+              ``SPATnnnn-{MASKDEF_OBJNAME}-{DET}``, where ``nnnn`` is the
+              nearest integer pixel in the spatial direction and
+              ``{MASKDEF_OBJNAME}`` is the instrument fiber name (e.g.,
+              ``SCI_042``).  Falls back to ``SLITmmmm`` if no fiber metadata
+              is available.
+
             - For echelle data, the name is ``OBJnnnn-{DET}-ORDERoooo``, where
               ``nnnn`` is 1000 times the fractional position along the spatial
               direction rounded to the nearest integer, ``{DET}`` is the string
@@ -487,9 +494,12 @@ class SpecObj(datamodel.DataContainer):
                 name += '{:04d}'.format(self.SPAT_PIXPOS_ID)
                 #name += '{:04d}'.format(int(np.rint(self.SPAT_PIXPOS)))
 
-            # Slit
-            name += '-'+naming_model['slit']
-            name += '{:04d}'.format(self.SLITID)
+            # Slit or fiber name
+            if self.PYPELINE == 'Fiber' and self['MASKDEF_OBJNAME'] is not None:
+                name += f'-{self.MASKDEF_OBJNAME}'
+            else:
+                name += '-'+naming_model['slit']
+                name += '{:04d}'.format(self.SLITID)
             name += f'-{self.DET}'
             self.NAME = name
         else:
