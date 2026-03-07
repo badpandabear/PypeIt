@@ -380,12 +380,17 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
                     # Horne Eq. 9: var = sum(P) / sum(P^2 * ivar)
                     fiber_ivar[i, row] = denom / np.sum(profile[good_iv])
 
+        # Get fiber metadata (IDs, names, types) from the spectrograph
+        fiber_meta = spectrograph.get_fiber_metadata(
+            int(det_name.replace('DET', '')), spat_ids)
+
         det_fiber_data[det_name] = {
             'flux': fiber_flux,
             'ivar': fiber_ivar,
             'wave': fiber_wave,
             'sky': fiber_sky,
             'slits': slits,
+            'fiber_meta': fiber_meta,
         }
 
     if len(det_fiber_data) == 0:
@@ -421,10 +426,11 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
     # Step 3: Identify sky fibers and sky-subtract
     # ------------------------------------------------------------------
     for det_name, data in det_fiber_data.items():
-        det_num = int(det_name.replace('DET', ''))
         nfibers = data['flux'].shape[0]
 
-        sky_mask = spectrograph.get_sky_fiber_mask(det_num, nfibers)
+        # Derive sky mask from fiber metadata
+        fiber_meta = data['fiber_meta']
+        sky_mask = fiber_meta['fiber_type'] == 'SKY'
         n_sky = np.sum(sky_mask)
         n_sci = np.sum(~sky_mask)
         log.info(f"  {det_name}: {n_sky} sky fibers, {n_sci} science fibers")

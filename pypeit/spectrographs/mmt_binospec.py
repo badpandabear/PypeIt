@@ -1684,3 +1684,48 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
         return fiber_ids, is_sky, is_dead
 
+    def get_fiber_metadata(self, det, slit_spat_ids):
+        """
+        Map detected fiber traces to Binospec IFU fiber identifiers.
+
+        Uses cross-correlation of detected trace positions against the
+        reference fiber profile to assign physical fiber IDs and names.
+
+        See base class for parameter and return value documentation.
+        """
+        ref = self.load_fiber_ref_profile(det)
+
+        # Get detected fiber center positions (spat_id is the spatial
+        # pixel position at the spectral midpoint)
+        detected_positions = slit_spat_ids.astype(float)
+
+        fiber_ids, is_sky, _ = self.match_fibers_to_reference(det, detected_positions)
+
+        # Build name and type arrays from the reference profile
+        nslits = len(slit_spat_ids)
+        fiber_names = np.full(nslits, 'UNKNOWN', dtype='U20')
+        fiber_types = np.full(nslits, 'UNKNOWN', dtype='U10')
+
+        # Map matched fiber IDs back to reference table for names,
+        # and derive type from FIB_NAME (SKY* = sky fiber, else science).
+        # The FIB_TYPE field in the reference file is unreliable (all SKY).
+        ref_ids = ref['FIB_ID']
+        ref_names = np.char.strip(ref['FIB_NAME'])
+
+        for i in range(nslits):
+            if fiber_ids[i] >= 0:
+                idx = np.where(ref_ids == fiber_ids[i])[0]
+                if len(idx) > 0:
+                    fiber_names[i] = ref_names[idx[0]]
+                    fiber_types[i] = 'SKY' if ref_names[idx[0]].startswith('SKY') \
+                        else 'SCI'
+
+        n_matched = np.sum(fiber_ids >= 0)
+        n_sky = np.sum(fiber_types == 'SKY')
+        log.info(f"Fiber metadata: {n_matched}/{nslits} fibers identified "
+                 f"({n_sky} sky, {n_matched - n_sky} science)")
+
+        return {'fiber_id': fiber_ids,
+                'fiber_name': fiber_names,
+                'fiber_type': fiber_types}
+

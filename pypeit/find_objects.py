@@ -1419,6 +1419,10 @@ class FiberFindObjects(SlicerIFUFindObjects):
         boxcar_rad = self.par['reduce']['extraction']['boxcar_radius'] \
             / self.get_platescale()
 
+        # Query instrument for fiber metadata (IDs, names, types)
+        fiber_meta = self.spectrograph.get_fiber_metadata(
+            self.det, self.slits.spat_id)
+
         for slit_idx in gdslits:
             slit_spat_id = self.slits.spat_id[slit_idx]
 
@@ -1446,6 +1450,12 @@ class FiberFindObjects(SlicerIFUFindObjects):
             thisobj.smash_peakflux = 1.0
             thisobj.smash_snr = 100.0
             thisobj.OBJID = slit_idx + 1
+
+            # Assign instrument fiber metadata if available
+            if fiber_meta is not None:
+                thisobj.MASKDEF_ID = int(fiber_meta['fiber_id'][slit_idx])
+                thisobj.MASKDEF_OBJNAME = fiber_meta['fiber_name'][slit_idx]
+
             thisobj.set_name()
 
             sobjs.add_sobj(thisobj)

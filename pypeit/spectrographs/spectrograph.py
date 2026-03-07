@@ -837,6 +837,38 @@ class Spectrograph:
         raise PypeItError('This spectrograph does not support the use of mask design. '
                    'Set `use_maskdesign=False`')
 
+    def get_fiber_metadata(self, det, slit_spat_ids):
+        """
+        Return fiber identification metadata for a fiber-fed spectrograph.
+
+        Spectrographs that use the ``Fiber`` pypeline should override this
+        method to map detected slit/fiber positions to instrument-defined
+        fiber identifiers (IDs, names, types, etc.).
+
+        Parameters
+        ----------
+        det : :obj:`int`
+            1-indexed detector number.
+        slit_spat_ids : `numpy.ndarray`_
+            Array of ``spat_id`` values for each detected slit/fiber,
+            shape ``(nslits,)``.
+
+        Returns
+        -------
+        :obj:`dict` or None
+            None if not implemented. Otherwise a dict with keys:
+
+            - ``'fiber_id'``: `numpy.ndarray`_ of int, instrument fiber
+              IDs for each slit. -1 for unmatched.
+            - ``'fiber_name'``: `numpy.ndarray`_ of str, human-readable
+              fiber names (e.g. ``'A42'``, ``'SKY6-1'``).
+            - ``'fiber_type'``: `numpy.ndarray`_ of str, fiber type
+              (e.g. ``'SCI'``, ``'SKY'``).
+
+            All arrays have shape ``(nslits,)``.
+        """
+        return None
+
     @staticmethod
     def maskdef_spec_minmax(maskfile=None, maskdef_ids=None, nspec=None, shift=150):
         """
