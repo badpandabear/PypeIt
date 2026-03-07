@@ -45,19 +45,25 @@ for more details on the hardware and observing modes.
 
 IFU data are identified automatically from the FITS header keyword
 ``MASK = 'IFU'`` and reduced using the ``mmt_binospec_ifu`` spectrograph
-class with the ``SlicerIFU`` pipeline.
+class with the ``Fiber`` pypeline.
+
+Unlike the ``SlicerIFU`` pypeline used for slicer-based IFUs, the
+``Fiber`` pypeline treats each fiber as a distinct object and performs
+1D spectral extraction as part of the standard pipeline run.  This
+produces both spec2d and spec1d output files.
 
 Key IFU parameters set by default:
 
-- 1D extraction is skipped (``skip_extraction = True``); extraction is
-  performed during datacube construction
-- Joint sky fitting across all fibers (``joint_fit = True``)
+- Joint sky fitting across all fibers using dedicated sky fibers
+  (``joint_fit = True``)
 - Grating-dependent B-spline spacing for sky subtraction:
   1.05 Angstrom (270 gpm), 0.5 Angstrom (600 gpm), 0.35 Angstrom
   (1000 gpm)
 - Fiber edge detection tuned for densely-packed traces
   (``edge_thresh = 5``)
 - Slit edge tweaking using the gradient method
+- Spectral flexure correction disabled (Binospec has active flexure
+  control)
 
 For a detailed comparison of the PypeIt and IDL IFU pipeline approaches,
 see :ref:`mmt_binospec_pipeline_comparison`.
@@ -75,23 +81,51 @@ are processed and written to separate spec2d output files.
    pypeit_setup -r /path/to/raw -s mmt_binospec_ifu -c all
    run_pypeit mmt_binospec_ifu_A/mmt_binospec_ifu_A.pypeit
 
+The pipeline produces spec1d files containing one extracted spectrum per
+fiber.  Each spectrum is identified by its instrument fiber name (e.g.,
+``SCI1-1``, ``SKY6-1``) via cross-correlation against a reference
+profile.  Both boxcar (``BOX``) and optimal Horne (1986) (``OPT``)
+extractions are performed.  The spec1d files can be inspected with
+``pypeit_show_1dspec``.
+
+.. note::
+
+   The pipeline wavelength calibration is done independently for each
+   fiber, which can be time-consuming (~360 fibers per detector).
+   A typical reduction with both detectors takes several hours.
+
 Producing datacubes
 +++++++++++++++++++
 
 Because the Binospec IFU is fiber-fed rather than slicer-based, the
 general-purpose ``pypeit_coadd_datacube`` script (designed for slicer
 IFUs like KCWI) does not produce correct results.  Instead, use the
-dedicated ``pypeit_binospec_ifu_cube`` script, which implements the
-fiber-based datacube construction workflow:
+dedicated ``pypeit_binospec_ifu_cube`` script, which accepts either
+spec1d or spec2d files and builds a datacube from the fiber spectra.
 
-1. Extracts each fiber as a 1D spectrum from the spec2d files using
-   optimal (Horne 1986) profile-weighted extraction with an empirical
-   spatial profile measured from the flat field calibration (default),
-   a Gaussian profile (``--gaussian``), or boxcar summation
-   (``--boxcar``)
-2. Subtracts sky using PypeIt's per-fiber B-spline sky model from the
-   spec2d file (default), or optionally using the 40 dedicated sky
-   fibers per side (``--use_fibers``)
+**From spec1d files (recommended):**
+
+The script reads the already-extracted 1D spectra from the pipeline's
+spec1d output.  By default, optimal (``OPT``) extraction is used; pass
+``--boxcar`` to use boxcar (``BOX``) extraction instead.  Sky
+subtraction is already applied by the pipeline, so no additional sky
+subtraction is performed.
+
+**From spec2d files:**
+
+The script extracts fiber spectra directly from the 2D spectral images
+using optimal (Horne 1986) extraction with an empirical spatial profile
+from the flat field (default), a Gaussian profile (``--gaussian``), or
+boxcar summation (``--boxcar``).  Sky is subtracted using PypeIt's
+per-fiber B-spline sky model (default), or optionally using the
+dedicated sky fibers (``--use_fibers``).
+
+**Shared steps (both inputs):**
+
+1. Applies fiber-to-fiber throughput correction using a pre-computed
+   illumination map (the pipeline does not apply this correction)
+2. Identifies sky vs. science fibers via cross-correlation against a
+   reference profile
 3. Resamples all fiber spectra onto a common linear wavelength grid
 4. Combines both detectors (up to 640 science fibers total)
 5. Maps each fiber to its on-sky position using the IFU layout
@@ -105,8 +139,23 @@ fiber-based datacube construction workflow:
    automatically accounts for this by reversing the fiber-to-sky mapping
    for side B so that the two halves of the IFU tile correctly.
 
+.. note::
+
+   The fiber-to-fiber throughput correction applied during cube building
+   is separate from the pipeline's pixel-level flat-fielding.  The
+   pipeline corrects pixel response but does not correct relative fiber
+   throughput (``use_illumflat = False``).  Spectral response
+   (flux calibration) from standard star observations is not yet
+   implemented.
+
 Basic usage
 ^^^^^^^^^^^
+
+To build datacubes from spec1d files (recommended):
+
+.. code-block:: bash
+
+   pypeit_binospec_ifu_cube spec1d_*.fits
 
 To build datacubes from spec2d files:
 
@@ -114,16 +163,17 @@ To build datacubes from spec2d files:
 
    pypeit_binospec_ifu_cube spec2d_*.fits
 
-Each input spec2d file produces a separate output datacube.  For
-example, three input files will produce three cubes named
-``cube_sci_img_*.fits``.  Each cube combines both detectors, applies
-sky subtraction, and contains ``FLUX`` and ``VAR`` extensions.
+All input files must be the same type (spec1d or spec2d); mixing is not
+allowed.  Each input file produces a separate output datacube named
+``cube_sci_img_*.fits``.  Each cube combines both detectors and
+contains ``FLUX`` and ``VAR`` extensions.
 
 Command-line options
 ^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
+   pypeit_binospec_ifu_cube spec1d_*.fits [options]
    pypeit_binospec_ifu_cube spec2d_*.fits [options]
 
 ``--output FILENAME``
@@ -136,26 +186,28 @@ Command-line options
    matches the IDL pipeline (``scl = 0.269461``).
 
 ``--no_skysub``
-   Skip sky subtraction entirely.
+   Skip sky subtraction entirely (spec2d only; ignored for spec1d
+   since sky is already subtracted by the pipeline).
 
 ``--use_fibers``
    Use the 40 dedicated sky fibers per side to compute a
    sigma-clipped mean sky spectrum for subtraction (matching the IDL
    pipeline approach).  By default, the script uses PypeIt's
-   per-fiber B-spline sky model from the spec2d file, which does a
-   better job handling bright features in the sky background.
+   per-fiber B-spline sky model from the spec2d file.  This option
+   is only relevant for spec2d input; it is ignored for spec1d.
 
 ``--boxcar``
-   Use boxcar (unweighted sum) extraction instead of the default
-   optimal (Horne 1986) profile-weighted extraction.  Boxcar may be
-   preferable for extended sources that do not match the fiber profile.
+   For spec1d input: use boxcar (``BOX``) extraction columns instead
+   of the default optimal (``OPT``) columns.  For spec2d input: use
+   boxcar (unweighted sum) extraction instead of the default optimal
+   (Horne 1986) profile-weighted extraction.
 
 ``--gaussian``
    Use a Gaussian spatial profile for optimal extraction instead of
-   the default empirical profile measured from the flat field.  The
-   Gaussian width is derived from the slit edge traces.  This is also
-   the automatic fallback if the flat field calibration file cannot be
-   loaded.
+   the default empirical profile measured from the flat field (spec2d
+   only).  The Gaussian width is derived from the slit edge traces.
+   This is also the automatic fallback if the flat field calibration
+   file cannot be loaded.
 
 ``--method METHOD``
    Spatial interpolation method: ``nearest``, ``linear`` (default), or

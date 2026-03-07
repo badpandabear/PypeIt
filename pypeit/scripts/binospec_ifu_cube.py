@@ -1,16 +1,17 @@
 """
-Build a datacube from Binospec IFU spec2d files.
+Build a datacube from Binospec IFU spec1d or spec2d files.
 
 Unlike the general ``pypeit_coadd_datacube`` script designed for slicer-based
 IFUs, this script handles the fiber-fed Binospec IFU by:
 
-1. Extracting each fiber as a 1D spectrum from spec2d files
+1. Reading extracted 1D fiber spectra from spec1d files, or extracting
+   them directly from spec2d files
 2. Sky subtracting using dedicated sky fiber spectra
 3. Mapping 320 science fibers per side to sky positions
 4. Combining both detectors (640 science fibers total)
 5. Interpolating scattered fiber positions onto a regular spatial grid
 
-Each input spec2d file produces a separate output datacube.
+Each input file produces a separate output datacube.
 
 .. include:: ../include/links.rst
 """
@@ -35,12 +36,12 @@ class BinospecIFUCube(scriptbase.ScriptBase):
     @classmethod
     def get_parser(cls, width: int | None = None) -> argparse.ArgumentParser:
         parser = super().get_parser(
-            description='Build a datacube from Binospec IFU spec2d files.',
+            description='Build a datacube from Binospec IFU spec1d or spec2d files.',
             width=width,
             default_log_file=True)
         parser.add_argument('files', type=str, nargs='+',
-                            help='One or more PypeIt spec2d files, or a text file '
-                                 'listing spec2d files (one per line)')
+                            help='One or more PypeIt spec1d or spec2d files, '
+                                 'or a text file listing them (one per line)')
         parser.add_argument('-o', '--output', type=str, default=None,
                             help='Output FITS filename (only valid for a single '
                                  'input file; default: auto-generated)')
@@ -50,7 +51,8 @@ class BinospecIFUCube(scriptbase.ScriptBase):
                             help='Skip sky subtraction')
         parser.add_argument('--use_fibers', default=False, action='store_true',
                             help='Use dedicated sky fibers for sky subtraction '
-                                 'instead of the default spec2d skymodel')
+                                 'instead of the default spec2d skymodel '
+                                 '(spec2d only; ignored for spec1d)')
         parser.add_argument('--boxcar', default=False, action='store_true',
                             help='Use boxcar extraction instead of optimal '
                                  '(profile-weighted) extraction')
@@ -77,37 +79,50 @@ class BinospecIFUCube(scriptbase.ScriptBase):
         # ----------------------------------------------------------------
         # Parse input files
         # ----------------------------------------------------------------
-        spec2d_files: list[str] = []
+        input_files: list[str] = []
         for f in args.files:
             if f.endswith('.txt'):
                 with open(f, 'r') as fh:
                     for line in fh:
                         line = line.strip()
                         if line and not line.startswith('#'):
-                            spec2d_files.append(line)
+                            input_files.append(line)
             else:
-                spec2d_files.append(f)
+                input_files.append(f)
 
-        if len(spec2d_files) == 0:
-            raise PypeItError("No spec2d files provided.")
+        if len(input_files) == 0:
+            raise PypeItError("No input files provided.")
 
-        if args.output is not None and len(spec2d_files) > 1:
+        if args.output is not None and len(input_files) > 1:
             raise PypeItError("--output can only be used with a single input file.")
 
-        log.info(f"Processing {len(spec2d_files)} spec2d file(s)")
+        # Detect file type from first file
+        is_spec1d = os.path.basename(input_files[0]).startswith('spec1d')
+
+        # Validate all files are the same type
+        for f in input_files:
+            bn = os.path.basename(f)
+            if is_spec1d and not bn.startswith('spec1d'):
+                raise PypeItError("Cannot mix spec1d and spec2d files.")
+            if not is_spec1d and not bn.startswith('spec2d'):
+                raise PypeItError("Cannot mix spec1d and spec2d files.")
+
+        file_type = 'spec1d' if is_spec1d else 'spec2d'
+        log.info(f"Processing {len(input_files)} {file_type} file(s)")
 
         # Load spectrograph and fiber layout (shared across all files)
-        with fits.open(spec2d_files[0]) as hdu:
+        with fits.open(input_files[0]) as hdu:
             spectrograph = load_spectrograph(hdu[0].header['PYP_SPEC'])
 
         targetx, targety = spectrograph.load_sky_layout()
 
         # ----------------------------------------------------------------
-        # Process each spec2d file into a separate datacube
+        # Process each file into a separate datacube
         # ----------------------------------------------------------------
-        for spec2d_file in spec2d_files:
-            log.info(f"Building datacube for {os.path.basename(spec2d_file)}")
-            _build_cube(spec2d_file, args, spectrograph, targetx, targety)
+        builder = _build_cube_from_spec1d if is_spec1d else _build_cube
+        for input_file in input_files:
+            log.info(f"Building datacube for {os.path.basename(input_file)}")
+            builder(input_file, args, spectrograph, targetx, targety)
 
 
 def _load_flat(spec2d: Spec2DObj, det_name: str,
@@ -225,6 +240,111 @@ def _build_empirical_profiles(flatimg: np.ndarray, slitid_img: np.ndarray,
     return profiles
 
 
+def _build_cube_from_spec1d(spec1d_file: str, args: argparse.Namespace,
+                            spectrograph: Spectrograph,
+                            targetx: np.ndarray, targety: np.ndarray) -> None:
+    """Build a single datacube from one spec1d file.
+
+    Reads the already-extracted 1D fiber spectra from a PypeIt spec1d file
+    and builds a datacube.  Uses OPT (optimal) extraction by default, or
+    BOX (boxcar) extraction if ``--boxcar`` is specified.
+
+    Parameters
+    ----------
+    spec1d_file : str
+        Path to the spec1d FITS file.
+    args : `argparse.Namespace`_
+        Parsed command-line arguments.
+    spectrograph : :class:`~pypeit.spectrographs.spectrograph.Spectrograph`
+        Spectrograph instance.
+    targetx : `numpy.ndarray`_
+        Fiber x positions on sky (arcsec).
+    targety : `numpy.ndarray`_
+        Fiber y positions on sky (arcsec).
+    """
+    import os
+
+    import numpy as np
+    from astropy.io import fits
+
+    from pypeit import log, PypeItError
+    from pypeit.specobjs import SpecObjs
+
+    sobjs = SpecObjs.from_fitsfile(spec1d_file)
+    if sobjs.nobj == 0:
+        log.warning(f"No objects in {os.path.basename(spec1d_file)}, skipping")
+        return
+
+    # Choose extraction type
+    prefix = 'BOX' if args.boxcar else 'OPT'
+    log.info(f"  Using {prefix} extraction from spec1d")
+
+    # ------------------------------------------------------------------
+    # Step 1: Organize fiber spectra by detector
+    # ------------------------------------------------------------------
+    det_fiber_data = {}
+
+    for det_name in ['DET01', 'DET02']:
+        det_sobjs = sobjs[sobjs.DET == det_name]
+        if len(det_sobjs) == 0:
+            log.warning(f"  No objects for {det_name}, skipping")
+            continue
+
+        nfibers = len(det_sobjs)
+        log.info(f"  {det_name}: {nfibers} fibers from spec1d")
+
+        # Read extracted spectra
+        wave_key = f'{prefix}_WAVE'
+        flux_key = f'{prefix}_COUNTS'
+        ivar_key = f'{prefix}_COUNTS_IVAR'
+        sky_key = f'{prefix}_COUNTS_SKY'
+
+        # Determine spectral length from first object
+        nspec = getattr(det_sobjs[0], wave_key).shape[0]
+
+        fiber_flux = np.zeros((nfibers, nspec))
+        fiber_ivar = np.zeros((nfibers, nspec))
+        fiber_wave = np.zeros((nfibers, nspec))
+        fiber_sky = np.zeros((nfibers, nspec))
+        spat_ids = np.zeros(nfibers, dtype=int)
+
+        for i, sobj in enumerate(det_sobjs):
+            fiber_wave[i] = getattr(sobj, wave_key)
+            fiber_flux[i] = getattr(sobj, flux_key)
+            fiber_ivar[i] = getattr(sobj, ivar_key)
+            sky = getattr(sobj, sky_key, None)
+            if sky is not None:
+                fiber_sky[i] = sky
+            spat_ids[i] = sobj.SLITID
+
+        # Get fiber metadata
+        fiber_meta = spectrograph.get_fiber_metadata(
+            int(det_name.replace('DET', '')), spat_ids)
+
+        det_fiber_data[det_name] = {
+            'flux': fiber_flux,
+            'ivar': fiber_ivar,
+            'wave': fiber_wave,
+            'sky': fiber_sky,
+            'fiber_meta': fiber_meta,
+        }
+
+    if len(det_fiber_data) == 0:
+        log.warning(f"No detector data from "
+                    f"{os.path.basename(spec1d_file)}, skipping")
+        return
+
+    # ------------------------------------------------------------------
+    # Steps 2-7: shared with spec2d path
+    # ------------------------------------------------------------------
+    with fits.open(spec1d_file) as hdu:
+        raw_hdr = hdu[0].header
+
+    _build_cube_common(det_fiber_data, args, spectrograph,
+                       targetx, targety, raw_hdr, spec1d_file,
+                       sky_already_subtracted=True)
+
+
 def _build_cube(spec2d_file: str, args: argparse.Namespace,
                 spectrograph: Spectrograph,
                 targetx: np.ndarray, targety: np.ndarray) -> None:
@@ -232,12 +352,7 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
     import os
 
     import numpy as np
-    from astropy import units
-    from astropy.coordinates import SkyCoord
     from astropy.io import fits
-    from astropy.stats import sigma_clipped_stats
-    from astropy import wcs
-    from scipy.interpolate import griddata
 
     from pypeit import log, PypeItError
     from pypeit.spec2dobj import AllSpec2DObj
@@ -399,6 +514,58 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
         return
 
     # ------------------------------------------------------------------
+    # Steps 2-7: shared with spec1d path
+    # ------------------------------------------------------------------
+    with fits.open(spec2d_file) as hdu:
+        raw_hdr = hdu[0].header
+
+    _build_cube_common(det_fiber_data, args, spectrograph,
+                       targetx, targety, raw_hdr, spec2d_file,
+                       sky_already_subtracted=False)
+
+
+def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
+                       spectrograph: Spectrograph,
+                       targetx: np.ndarray, targety: np.ndarray,
+                       raw_hdr, input_file: str,
+                       sky_already_subtracted: bool = False) -> None:
+    """Shared steps 2-7 for building a datacube from fiber spectra.
+
+    Parameters
+    ----------
+    det_fiber_data : dict
+        Per-detector fiber data. Keys are detector names (e.g. ``'DET01'``),
+        values are dicts with keys ``'flux'``, ``'ivar'``, ``'wave'``,
+        ``'sky'``, ``'fiber_meta'``.
+    args : `argparse.Namespace`_
+        Parsed command-line arguments.
+    spectrograph : :class:`~pypeit.spectrographs.spectrograph.Spectrograph`
+        Spectrograph instance.
+    targetx : `numpy.ndarray`_
+        Fiber x positions on sky (arcsec).
+    targety : `numpy.ndarray`_
+        Fiber y positions on sky (arcsec).
+    raw_hdr : `astropy.io.fits.Header`_
+        Primary header from the input file.
+    input_file : str
+        Path to the input file (for generating the output filename).
+    sky_already_subtracted : bool, optional
+        If True, the flux arrays are already sky-subtracted (e.g. from
+        spec1d) and sky subtraction is skipped.
+    """
+    import os
+
+    import numpy as np
+    from astropy import units
+    from astropy.coordinates import SkyCoord
+    from astropy.io import fits
+    from astropy.stats import sigma_clipped_stats
+    from astropy import wcs
+    from scipy.interpolate import griddata
+
+    from pypeit import log
+
+    # ------------------------------------------------------------------
     # Step 2: Apply fiber-to-fiber illumination correction
     # ------------------------------------------------------------------
     for det_name, data in det_fiber_data.items():
@@ -435,7 +602,9 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
         n_sci = np.sum(~sky_mask)
         log.info(f"  {det_name}: {n_sky} sky fibers, {n_sci} science fibers")
 
-        if not args.no_skysub:
+        if sky_already_subtracted:
+            log.info(f"  Sky already subtracted (spec1d), skipping")
+        elif not args.no_skysub:
             if args.use_fibers and n_sky > 0:
                 log.info(f"  Computing sky spectrum from {n_sky} sky fibers")
 
@@ -490,8 +659,8 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
             all_waves.extend([np.min(wave[valid]), np.max(wave[valid])])
 
     if len(all_waves) == 0:
-        log.error("No valid wavelength data found in any detector. "
-                  "Check that spec2d files contain extracted fiber spectra.")
+        log.error("No valid wavelength data found. "
+                  "Check that input files contain extracted fiber spectra.")
         return
     wave_min = min(all_waves[::2])
     wave_max = max(all_waves[1::2])
@@ -641,9 +810,6 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
     # ------------------------------------------------------------------
     # Step 7: Build WCS and write output
     # ------------------------------------------------------------------
-    with fits.open(spec2d_file) as hdu:
-        raw_hdr = hdu[0].header
-
     # Pointing
     raval = raw_hdr.get('RA', 0.0)
     decval = raw_hdr.get('DEC', 0.0)
@@ -699,8 +865,13 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
     if args.output is not None:
         outfile = args.output
     else:
-        base = os.path.splitext(os.path.basename(spec2d_file))[0]
-        outfile = base.replace('spec2d_', 'cube_') + '.fits'
+        base = os.path.splitext(os.path.basename(input_file))[0]
+        # Handle both spec1d_ and spec2d_ prefixes
+        for prefix in ['spec1d_', 'spec2d_']:
+            if prefix in base:
+                base = base.replace(prefix, 'cube_')
+                break
+        outfile = base + '.fits'
 
     # Transpose from numpy (nx, ny, n_wave) to FITS order (n_wave, ny, nx)
     # so that NAXIS1=nx(RA), NAXIS2=ny(DEC), NAXIS3=n_wave(WAVE)

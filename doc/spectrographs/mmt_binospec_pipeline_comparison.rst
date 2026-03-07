@@ -116,8 +116,8 @@ Comparison Table
 Implication
 +++++++++++
 
-Adding Binospec IFU to PypeIt will automatically provide proper error
-propagation that the IDL pipeline currently lacks.  This is particularly
+The Binospec IFU implementation in PypeIt automatically provides proper
+error propagation that the IDL pipeline lacks.  This is particularly
 important for:
 
 - Faint emission-line science where reliable S/N estimates are critical
@@ -227,22 +227,22 @@ Comparison Table
      - Not explicitly corrected
      - PSF difference kernel applied
 
-Implication for Binospec IFU in PypeIt
-++++++++++++++++++++++++++++++++++++++
+Current implementation
++++++++++++++++++++++
 
-For Binospec IFU in PypeIt, the dedicated sky-fiber approach from the IDL
-pipeline should be combined with PypeIt's variance-weighted B-spline
-fitting:
+The Binospec IFU in PypeIt combines the dedicated sky-fiber approach
+from the IDL pipeline with PypeIt's variance-weighted B-spline fitting:
 
-1. **Sky fiber identification**: Use IDL's fiber indices
-   [0-7, 88-95, 176-183, 264-271, 352-359] (outermost ring of each
-   hexagonal sub-bundle) to build a sky mask
-2. **Joint sky fit**: Use PypeIt's ``joint_skysub()`` with B-spline
-   fitting across all sky fibers, gaining proper ``ivar`` weighting
-3. **Grating-dependent spacing**: Adopt IDL's bspline_spacing values per
-   grating (1.05/0.5/0.35 Angstrom for 270/600/1000 gpm)
-4. **Sky line correction**: Consider implementing IDL's PSF difference
-   kernel approach as a future enhancement
+1. **Sky fiber identification**: Sky fibers are identified by
+   cross-correlation against a reference profile and matched by fiber
+   name (``SKY*``), providing robust identification even when fiber
+   ordering differs from the reference
+2. **Joint sky fit**: PypeIt's ``joint_skysub()`` with B-spline fitting
+   across all sky fibers, with proper ``ivar`` weighting
+3. **Grating-dependent spacing**: Uses the IDL pipeline's bspline_spacing
+   values per grating (1.05/0.5/0.35 Angstrom for 270/600/1000 gpm)
+4. **Sky line correction**: IDL's PSF difference kernel approach is not
+   yet implemented; this is a potential future enhancement
 
 
 Fiber-Specific Considerations
@@ -268,7 +268,7 @@ Fiber Tracing
      - Gaussian or empirical for extraction
      - 8-parameter Gaussian-Hermite or Moffat
    * - Fiber ID
-     - Sequential edge numbering
+     - Cross-correlation against reference profile
      - Cross-correlation against reference profile
    * - Dead fiber handling
      - Not applicable (slit-based)
@@ -294,7 +294,7 @@ Extraction
      - Full ``ivar`` per pixel
      - None
    * - Profile
-     - Empirical from data
+     - Empirical from flat field
      - Gaussian-Hermite from flat field
 
 Wavelength Calibration
@@ -330,8 +330,12 @@ specialized algorithms for fiber-fed spectroscopy (Gaussian-Hermite
 profiles, bounded least-squares extraction, dedicated sky fibers,
 PSF-matched sky subtraction).
 
-The optimal strategy for Binospec IFU in PypeIt is to leverage PypeIt's
-infrastructure (variance model, B-spline fitting, datacube construction)
-while incorporating the domain-specific knowledge from the IDL pipeline
-(sky fiber layout, fiber identification via cross-correlation,
-grating-specific parameters).
+The current PypeIt implementation leverages PypeIt's infrastructure
+(variance model, B-spline fitting, optimal extraction) while
+incorporating domain-specific knowledge from the IDL pipeline (sky fiber
+layout, fiber identification via cross-correlation, grating-specific
+parameters, fiber throughput correction).  Remaining differences include
+the IDL pipeline's simultaneous multi-fiber bounded least-squares
+extraction (which handles cross-talk between adjacent fibers) and PSF
+difference kernel for sky line correction, neither of which is yet
+implemented in PypeIt.
