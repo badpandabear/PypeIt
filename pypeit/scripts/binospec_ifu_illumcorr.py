@@ -49,11 +49,17 @@ class BinospecIFUIllumCorr(scriptbase.ScriptBase):
 
         cls.init_log(args)
 
-        if len(args.files) == 0:
-            raise PypeItError("No input files provided.")
+        # Filter to FITS files only
+        input_files = [f for f in args.files if f.endswith('.fits')]
+        if len(input_files) == 0:
+            raise PypeItError("No FITS files provided.")
+
+        n_skipped = len(args.files) - len(input_files)
+        if n_skipped > 0:
+            log.warning(f"Skipping {n_skipped} non-FITS file(s)")
 
         # Load spectrograph from first file header
-        with fits.open(args.files[0]) as hdu:
+        with fits.open(input_files[0]) as hdu:
             spectrograph = load_spectrograph(hdu[0].header['PYP_SPEC'])
 
         log.info(f"Spectrograph: {spectrograph.name}")
@@ -62,7 +68,7 @@ class BinospecIFUIllumCorr(scriptbase.ScriptBase):
         illum_lookup = _build_illum_lookup(spectrograph)
 
         # Process each file
-        for filepath in args.files:
+        for filepath in input_files:
             log.info(f"Processing {os.path.basename(filepath)}")
             _apply_illumcorr(filepath, illum_lookup, args)
 
