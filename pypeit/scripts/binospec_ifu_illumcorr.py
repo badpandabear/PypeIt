@@ -81,7 +81,6 @@ def _build_illum_lookup(spectrograph) -> dict:
         Keys are ``(det_num, fib_id)`` tuples, values are float illumination
         correction factors.
     """
-    import numpy as np
     from pypeit import log
 
     lookup = {}
