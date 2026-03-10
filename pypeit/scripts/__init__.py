@@ -6,6 +6,7 @@ from pypeit.scripts import scriptbase
 # compiling of all the available scripts below
 from pypeit.scripts import arxiv_solution
 from pypeit.scripts import binospec_ifu_cube
+from pypeit.scripts import binospec_ifu_illumcorr
 from pypeit.scripts import cache_github_data
 from pypeit.scripts import chk_alignments
 from pypeit.scripts import chk_edges
