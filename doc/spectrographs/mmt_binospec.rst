@@ -94,6 +94,40 @@ extractions are performed.  The spec1d files can be inspected with
    fiber, which can be time-consuming (~360 fibers per detector).
    A typical reduction with both detectors takes several hours.
 
+Fiber illumination correction
++++++++++++++++++++++++++++++
+
+The pipeline flat-fields at the pixel level but does not correct for
+relative fiber-to-fiber throughput differences.  The dedicated
+``pypeit_binospec_ifu_illumcorr`` script applies this correction
+directly to spec1d files using a pre-computed illumination map
+(``fiber_illumination.fits``).
+
+.. code-block:: bash
+
+   pypeit_binospec_ifu_illumcorr spec1d_*.fits
+
+This divides each fiber's flux (and sky) by its relative throughput
+factor and multiplies the inverse variance accordingly.  The corrected
+spectra are written to new files with an ``_illumcorr`` suffix
+(e.g., ``spec1d_*_illumcorr.fits``).  Use ``--overwrite`` to modify the
+original files in place instead.
+
+The script sets the header keyword ``ILLUMCOR = True`` on the output
+files.  Both ``pypeit_binospec_ifu_illumcorr`` and
+``pypeit_binospec_ifu_cube`` check this flag to avoid applying the
+correction twice.
+
+If the spec1d files have already been flux-calibrated (i.e., contain
+``FLAM`` columns), the script will warn and skip them.  Use ``--force``
+to override this check.
+
+.. note::
+
+   This correction should be applied *before* flux calibration.  The
+   illumination correction is a spatial (fiber-to-fiber) effect, while
+   flux calibration is a spectral response correction.
+
 Producing datacubes
 +++++++++++++++++++
 
@@ -123,7 +157,8 @@ dedicated sky fibers (``--use_fibers``).
 **Shared steps (both inputs):**
 
 1. Applies fiber-to-fiber throughput correction using a pre-computed
-   illumination map (the pipeline does not apply this correction)
+   illumination map (skipped if the input spec1d file already has
+   ``ILLUMCOR = True``, e.g., from ``pypeit_binospec_ifu_illumcorr``)
 2. Identifies sky vs. science fibers via cross-correlation against a
    reference profile
 3. Resamples all fiber spectra onto a common linear wavelength grid
@@ -144,7 +179,9 @@ dedicated sky fibers (``--use_fibers``).
    The fiber-to-fiber throughput correction applied during cube building
    is separate from the pipeline's pixel-level flat-fielding.  The
    pipeline corrects pixel response but does not correct relative fiber
-   throughput (``use_illumflat = False``).  Spectral response
+   throughput (``use_illumflat = False``).  The correction can also be
+   applied directly to spec1d files using
+   ``pypeit_binospec_ifu_illumcorr`` (see above).  Spectral response
    (flux calibration) from standard star observations is not yet
    implemented.
 
