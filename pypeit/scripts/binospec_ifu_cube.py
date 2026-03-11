@@ -568,6 +568,7 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     from astropy.stats import sigma_clipped_stats
     from astropy import wcs
     from scipy.interpolate import griddata
+    from scipy.spatial import QhullError
 
     from pypeit import log
 
@@ -817,16 +818,28 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
         if np.sum(good) < 4:
             continue
 
-        cube[:, :, k] = griddata(
-            points[good], flux_slice[good], (grid_x, grid_y),
-            method=args.method, fill_value=0.0)
+        try:
+            cube[:, :, k] = griddata(
+                points[good], flux_slice[good], (grid_x, grid_y),
+                method=args.method, fill_value=0.0)
+        except QhullError:
+            # Fall back to nearest-neighbor when valid points are
+            # degenerate (e.g. collinear at spectral edges)
+            cube[:, :, k] = griddata(
+                points[good], flux_slice[good], (grid_x, grid_y),
+                method='nearest', fill_value=0.0)
 
         # Interpolate variance
         var_slice = np.where(ivar_slice > 0, 1.0 / ivar_slice, 0.0)
         if np.any(var_slice[good] > 0):
-            var_cube[:, :, k] = griddata(
-                points[good], var_slice[good], (grid_x, grid_y),
-                method=args.method, fill_value=0.0)
+            try:
+                var_cube[:, :, k] = griddata(
+                    points[good], var_slice[good], (grid_x, grid_y),
+                    method=args.method, fill_value=0.0)
+            except QhullError:
+                var_cube[:, :, k] = griddata(
+                    points[good], var_slice[good], (grid_x, grid_y),
+                    method='nearest', fill_value=0.0)
 
     # ------------------------------------------------------------------
     # Step 7: Build WCS and write output
