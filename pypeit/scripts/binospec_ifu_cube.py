@@ -769,7 +769,7 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     # Trim wavelength range to where a reasonable fraction of fibers
     # have valid data (avoids degenerate interpolation at edges)
     n_valid = np.sum((combined_flux != 0) | (combined_ivar > 0), axis=0)
-    min_fibers = max(10, int(0.05 * n_sci_fibers))
+    min_fibers = max(10, int(0.10 * n_sci_fibers))
     good_wave = n_valid >= min_fibers
     if not np.all(good_wave):
         first = np.argmax(good_wave)
