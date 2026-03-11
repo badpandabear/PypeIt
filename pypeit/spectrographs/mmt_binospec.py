@@ -1521,6 +1521,60 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             f_illum = hdu[1].data['F_ILLUM'][row].copy()
         return f_illum
 
+    def modify_pixelflat(self, flatimages, slits, det):
+        """
+        Bake fiber-to-fiber illumination correction into the pixel flat.
+
+        Scales each fiber's region in ``pixelflat_norm`` by its relative
+        throughput factor from ``fiber_illumination.fits``.  When PypeIt
+        divides the science image by this modified flat, the fiber
+        throughput variation is corrected along with the pixel response.
+
+        Args:
+            flatimages (:class:`~pypeit.flatfield.FlatImages`):
+                Flat-field images to modify (in place).
+            slits (:class:`~pypeit.slittrace.SlitTraceSet`):
+                Slit traces.
+            det (:obj:`int`):
+                1-indexed detector number.
+        """
+        from pypeit import log
+
+        if flatimages.pixelflat_norm is None:
+            return
+
+        det_num = det if isinstance(det, int) else int(det)
+        f_illum_all = self.load_fiber_illumination(det_num)
+        ref = self.load_fiber_ref_profile(det_num)
+        ref_ids = ref['FIB_ID']
+
+        # Map each slit to its fiber ID via spatial position matching
+        spat_ids = slits.spat_id
+        fiber_meta = self.get_fiber_metadata(det_num, spat_ids)
+
+        # Build slit mask image (pixel -> spat_id)
+        slitmask = slits.slit_img(pad=0)
+
+        n_scaled = 0
+        for i, spat_id in enumerate(spat_ids):
+            fid = fiber_meta['fiber_id'][i]
+            if fid < 0:
+                continue
+            idx = np.where(ref_ids == fid)[0]
+            if len(idx) == 0 or idx[0] >= len(f_illum_all):
+                continue
+            f_illum = float(f_illum_all[idx[0]])
+            if f_illum < 0.1:
+                continue
+
+            # Scale this fiber's pixels in the flat
+            slit_pixels = slitmask == spat_id
+            flatimages.pixelflat_norm[slit_pixels] *= f_illum
+            n_scaled += 1
+
+        log.info(f"DET{det_num:02d}: applied fiber illumination correction "
+                 f"to pixel flat ({n_scaled} fibers)")
+
     def get_sky_fiber_mask(self, det: int, nslits: int) -> np.ndarray:
         """
         Return a boolean mask identifying which fiber/slit indices are
