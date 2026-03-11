@@ -766,6 +766,21 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     log.info(f"Combined {n_sci_fibers} science fibers from "
               f"{len(det_fiber_data)} detector(s)")
 
+    # Trim wavelength range to where a reasonable fraction of fibers
+    # have valid data (avoids degenerate interpolation at edges)
+    n_valid = np.sum((combined_flux != 0) | (combined_ivar > 0), axis=0)
+    min_fibers = max(10, int(0.05 * n_sci_fibers))
+    good_wave = n_valid >= min_fibers
+    if not np.all(good_wave):
+        first = np.argmax(good_wave)
+        last = n_wave - 1 - np.argmax(good_wave[::-1])
+        log.info(f"Trimming wavelength range: slices {first}-{last} of "
+                  f"{n_wave} (>={min_fibers} fibers required)")
+        wave_grid = wave_grid[first:last + 1]
+        combined_flux = combined_flux[:, first:last + 1]
+        combined_ivar = combined_ivar[:, first:last + 1]
+        n_wave = len(wave_grid)
+
     # Load fiber sky positions
     fiber_x = targetx[combined_layout]
     fiber_y = targety[combined_layout]
