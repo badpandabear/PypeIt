@@ -1070,7 +1070,8 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
         # pixels within thismask, but the bspline fit uses only sky fiber data.
         # Keep the full inmask for other operations (e.g. illum correction).
         skysub_inmask = inmask
-        if hasattr(self.spectrograph, 'get_sky_fiber_mask'):
+        has_sky_fibers = hasattr(self.spectrograph, 'get_sky_fiber_mask')
+        if has_sky_fibers:
             sky_fiber_mask = self.spectrograph.get_sky_fiber_mask(self.det, self.slits.nslits)
             sky_spat_ids = self.slits.spat_id[sky_fiber_mask]
             sky_slit_mask = np.isin(self.slitmask, sky_spat_ids)
@@ -1103,6 +1104,11 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
         # Prepare the slitmasks for the relative spectral illumination
         slitmask = self.slits.slit_img(pad=0, flexure=self.spat_flexure_shift)
         slitmask_trim = self.slits.slit_img(pad=-3, flexure=self.spat_flexure_shift)
+        # When using dedicated sky fibers, most pixels in thismask are
+        # science fibers excluded by skysub_inmask.  Override max_mask_frac
+        # so the masking check doesn't reject the fit.
+        skysub_max_mask_frac = 1.0 if has_sky_fibers \
+            else self.par['reduce']['skysub']['max_mask_frac']
         for nn in range(numiter):
             log.info("Performing iterative joint sky subtraction - ITERATION {0:d}/{1:d}".format(nn+1, numiter))
             # TODO trim_edg is in the parset so it should be passed in here via trim_edg=tuple(self.par['reduce']['trim_edge']),
@@ -1112,7 +1118,7 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
                                                          bsp=self.par['reduce']['skysub']['bspline_spacing'],
                                                          no_poly=self.par['reduce']['skysub']['no_poly'],
                                                          pos_mask=not self.bkg_redux and not objs_not_masked,
-                                                         max_mask_frac=self.par['reduce']['skysub']['max_mask_frac'],
+                                                         max_mask_frac=skysub_max_mask_frac,
                                                          show_fit=show_fit)
 
             # Calculate the relative spectral illumination
@@ -1161,7 +1167,7 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
                                                      bsp=self.par['reduce']['skysub']['bspline_spacing'],
                                                      no_poly=self.par['reduce']['skysub']['no_poly'],
                                                      pos_mask=not self.bkg_redux and not objs_not_masked,
-                                                     max_mask_frac=self.par['reduce']['skysub']['max_mask_frac'],
+                                                     max_mask_frac=skysub_max_mask_frac,
                                                      show_fit=show_fit)
 
         # Update the ivar image used in the sky fit
