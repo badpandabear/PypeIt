@@ -1130,6 +1130,15 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
     ])
     # 1-based fiber IDs for matching against reference profile FIB_ID
     sky_fiber_ids = sky_fiber_indices_0based + 1
+    # Bright sky emission lines for throughput correction (Angstroms).
+    # These must be isolated enough to measure reliably with
+    # continuum sidebands.  Source: Binospec IDL pipeline
+    # (Chilingarian et al. 2025, arXiv:2501.01528).
+    # Note: 4358.335 (Hg I) omitted -- unreliable at dark sites.
+    skyline_list_ang = np.array([
+        5577.34, 6300.304, 6863.951, 7340.881,
+        7993.327, 8465.353, 8885.843, 9502.808
+    ])
 
     def configuration_keys(self):
         """
@@ -1574,6 +1583,191 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
         log.info(f"DET{det_num:02d}: applied fiber illumination correction "
                  f"to pixel flat ({n_scaled} fibers)")
+
+    def compute_skyline_illum(self, sciimg, waveimg, slitmask, spat_ids):
+        """
+        Compute per-fiber throughput correction from sky emission lines.
+
+        For each sky line within the wavelength range, extracts boxcar
+        flux per fiber, subtracts local continuum, and normalizes by
+        the median across fibers.  Interpolates between lines to build
+        a wavelength-dependent correction per fiber.
+
+        Fibers with no valid line measurements (e.g. dead fibers) are
+        left uncorrected (correction = 1.0).
+
+        Args:
+            sciimg (`numpy.ndarray`_):
+                2D flat-fielded science image.
+            waveimg (`numpy.ndarray`_):
+                Wavelength image in Angstroms.
+            slitmask (`numpy.ndarray`_):
+                2D slit image (pixel -> spat_id).
+            spat_ids (`numpy.ndarray`_):
+                Array of spatial IDs for each fiber.
+
+        Returns:
+            `numpy.ndarray`_: 2D correction image (same shape as
+            sciimg).  Values > 1 for fibers brighter than median.
+        """
+        from scipy.interpolate import interp1d
+
+        nfibers = len(spat_ids)
+
+        # Determine wavelength range from the data
+        valid = waveimg > 0
+        if not np.any(valid):
+            log.warning("No valid wavelength data; skipping skyline "
+                        "illumination correction")
+            return np.ones_like(sciimg)
+        wmin = waveimg[valid].min()
+        wmax = waveimg[valid].max()
+
+        # Filter sky lines to those within the wavelength range with
+        # enough margin for continuum estimation (50 Ang each side)
+        margin = 50.0
+        usable = ((self.skyline_list_ang > wmin + margin)
+                  & (self.skyline_list_ang < wmax - margin))
+        sky_lines = self.skyline_list_ang[usable]
+        if len(sky_lines) == 0:
+            log.warning("No sky lines in wavelength range "
+                        f"[{wmin:.0f}, {wmax:.0f}] Ang; skipping "
+                        "skyline illumination correction")
+            return np.ones_like(sciimg)
+        log.info(f"Measuring {len(sky_lines)} sky lines for fiber "
+                 f"throughput correction")
+
+        # Extract 1D boxcar spectrum per fiber
+        nspec = sciimg.shape[0]
+        fiber_flux = np.zeros((nfibers, nspec))
+        fiber_wave = np.zeros((nfibers, nspec))
+        for i, spat_id in enumerate(spat_ids):
+            slit_pix = slitmask == spat_id
+            for j in range(nspec):
+                row_pix = slit_pix[j, :]
+                if np.any(row_pix):
+                    fiber_flux[i, j] = np.sum(sciimg[j, row_pix])
+                    fiber_wave[i, j] = np.mean(waveimg[j, row_pix])
+
+        # Measure each sky line in each fiber
+        line_window = 4.0   # Angstroms half-width for line flux
+        cont_inner = 8.0    # Angstroms from line center to start of
+                             # continuum window
+        cont_outer = 20.0   # Angstroms from line center to end of
+                             # continuum window
+        min_valid_fibers = max(10, nfibers // 10)
+
+        # Shape: (n_lines, n_fibers)
+        line_ratios = np.full((len(sky_lines), nfibers), np.nan)
+
+        for k, wl in enumerate(sky_lines):
+            fiber_line_flux = np.zeros(nfibers)
+            for i in range(nfibers):
+                wave_i = fiber_wave[i]
+                flux_i = fiber_flux[i]
+                good = wave_i > 0
+
+                if not np.any(good):
+                    continue
+
+                # Line window
+                in_line = good & (np.abs(wave_i - wl) <= line_window)
+                # Continuum windows (blue and red sidebands)
+                in_cont = (good
+                           & (np.abs(wave_i - wl) >= cont_inner)
+                           & (np.abs(wave_i - wl) <= cont_outer))
+
+                if np.sum(in_line) < 2 or np.sum(in_cont) < 3:
+                    continue
+
+                cont_level = np.median(flux_i[in_cont])
+                line_sum = np.sum(flux_i[in_line] - cont_level)
+                fiber_line_flux[i] = line_sum
+
+            # Normalize by median across fibers (exclude zeros/negatives)
+            valid_flux = fiber_line_flux > 0
+            if np.sum(valid_flux) < min_valid_fibers:
+                log.warning(f"Sky line {wl:.1f} Ang: too few valid "
+                            f"fibers ({np.sum(valid_flux)}), skipping")
+                continue
+            med_flux = np.median(fiber_line_flux[valid_flux])
+            ratios = np.where(valid_flux,
+                              fiber_line_flux / med_flux, np.nan)
+            line_ratios[k] = ratios
+            n_valid = np.sum(valid_flux)
+            rmin = np.nanmin(ratios)
+            rmax = np.nanmax(ratios)
+            log.info(f"  {wl:.1f} Ang: {n_valid} fibers, "
+                     f"range {rmin:.3f} - {rmax:.3f}")
+
+        # Check we have at least one usable line
+        usable_lines = ~np.all(np.isnan(line_ratios), axis=1)
+        if not np.any(usable_lines):
+            log.warning("No sky lines measured successfully; skipping "
+                        "skyline illumination correction")
+            return np.ones_like(sciimg)
+        sky_lines = sky_lines[usable_lines]
+        line_ratios = line_ratios[usable_lines]
+
+        # Build wavelength-dependent correction per fiber.
+        # For fibers with missing measurements at some lines, use
+        # nearest valid value via fill_value extrapolation.
+        corr_2d = np.ones_like(sciimg)
+        for i, spat_id in enumerate(spat_ids):
+            slit_pix = slitmask == spat_id
+            if not np.any(slit_pix):
+                continue
+
+            # Get this fiber's ratios across lines
+            ratios_i = line_ratios[:, i]
+            good_lines = ~np.isnan(ratios_i)
+
+            if not np.any(good_lines):
+                continue
+
+            if np.sum(good_lines) == 1:
+                # Single line: constant correction
+                corr_val = ratios_i[good_lines][0]
+                corr_2d[slit_pix] = corr_val
+            else:
+                # Interpolate between lines
+                interp_func = interp1d(
+                    sky_lines[good_lines], ratios_i[good_lines],
+                    kind='linear', bounds_error=False,
+                    fill_value=(ratios_i[good_lines][0],
+                                ratios_i[good_lines][-1]))
+                # Get wavelength at each pixel in this fiber
+                wave_pix = waveimg[slit_pix]
+                corr_2d[slit_pix] = interp_func(wave_pix)
+
+        # Safety: clip extreme corrections
+        corr_2d = np.clip(corr_2d, 0.3, 3.0)
+
+        return corr_2d
+
+    def skyline_illum_correct(self, sciimg, waveimg, slits, slitmask):
+        """
+        Apply sky-line-based illumination correction.
+
+        Corrects for throughput differences between sky fibers (bare
+        fibers) and science fibers (lenslet-fed) that the dome-flat-based
+        illumination correction cannot capture.  Only modifies ``sciimg``
+        in place; variance is handled by the caller.
+
+        See :meth:`compute_skyline_illum` for the algorithm.
+        """
+        corr = self.compute_skyline_illum(sciimg, waveimg, slitmask,
+                                          slits.spat_id)
+        if np.allclose(corr, 1.0):
+            return corr
+
+        # Apply: divide science image only (variance handled by caller)
+        good = corr > 0.1
+        sciimg[good] /= corr[good]
+        log.info("Applied sky-line illumination correction "
+                 f"(range {corr[good].min():.3f} - "
+                 f"{corr[good].max():.3f})")
+        return corr
 
     def get_sky_fiber_mask(self, det: int, nslits: int) -> np.ndarray:
         """

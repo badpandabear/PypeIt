@@ -1382,6 +1382,36 @@ class Spectrograph:
         """
         pass
 
+    def skyline_illum_correct(self, sciimg, waveimg, slits, slitmask):
+        """
+        Spectrograph-specific sky-line-based illumination correction.
+
+        Measures bright sky emission line fluxes across fibers and builds
+        a wavelength-dependent throughput correction.  The default
+        implementation does nothing.
+
+        This method should only modify ``sciimg`` in place (dividing by
+        the correction).  Variance propagation is handled separately by
+        the caller via
+        :meth:`~pypeit.find_objects.FindObjects.apply_relative_scale`.
+
+        Args:
+            sciimg (`numpy.ndarray`_):
+                2D flat-fielded science image (nspec, nspat).  Modified
+                in place (divided by the correction).
+            waveimg (`numpy.ndarray`_):
+                Wavelength image in Angstroms.
+            slits (:class:`~pypeit.slittrace.SlitTraceSet`):
+                Slit traces.
+            slitmask (`numpy.ndarray`_):
+                2D image mapping pixels to slit ``spat_id``.
+
+        Returns:
+            `numpy.ndarray`_: 2D correction image that was applied
+            (1.0 everywhere if no correction).
+        """
+        return np.ones_like(sciimg)
+
     def get_rawimage(self, raw_file, det, sec_includes_binning=False):
         """
         Read raw spectrograph image files and return data and relevant metadata

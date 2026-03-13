@@ -1104,6 +1104,17 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
         # Prepare the slitmasks for the relative spectral illumination
         slitmask = self.slits.slit_img(pad=0, flexure=self.spat_flexure_shift)
         slitmask_trim = self.slits.slit_img(pad=-3, flexure=self.spat_flexure_shift)
+        # Apply spectrograph-specific sky-line illumination correction.
+        # For fiber-fed spectrographs (e.g. Binospec IFU), this equalizes
+        # throughput differences between sky and science fibers that are
+        # not captured by the dome-flat-based illumination correction.
+        # Only sciimg (a copy) is modified here; variance propagation to
+        # self.sciImg is deferred to apply_relative_scale after the loop.
+        # NOTE: This interacts with the illum_profile_spectral_poly
+        # iteration below — both corrections converge together, which is
+        # the desired behavior.
+        skyline_corr = self.spectrograph.skyline_illum_correct(
+            sciimg, self.waveimg, self.slits, slitmask)
         # When using dedicated sky fibers, most pixels in thismask are
         # science fibers excluded by skysub_inmask.  Override max_mask_frac
         # so the masking check doesn't reject the fit.
@@ -1159,6 +1170,11 @@ class SlicerIFUFindObjects(MultiSlitFindObjects):
 
         # Now we have a correct scale, apply it to the original science image
         self.apply_relative_scale(scaleImg)
+        # Apply the skyline illumination correction to the original
+        # science image (and propagate to variance) so the final sky
+        # recalculation uses corrected data.
+        if not np.allclose(skyline_corr, 1.0):
+            self.apply_relative_scale(skyline_corr)
 
         # Recalculate the joint sky using the original image
         _global_sky[thismask] = skysub.global_skysub(self.sciImg.image, model_ivar, tilt_wave,
