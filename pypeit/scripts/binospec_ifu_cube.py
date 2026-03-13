@@ -339,12 +339,10 @@ def _build_cube_from_spec1d(spec1d_file: str, args: argparse.Namespace,
     # ------------------------------------------------------------------
     with fits.open(spec1d_file) as hdu:
         raw_hdr = hdu[0].header
-        illumcor_done = raw_hdr.get('ILLUMCOR', False)
 
     _build_cube_common(det_fiber_data, args, spectrograph,
                        targetx, targety, raw_hdr, spec1d_file,
-                       sky_already_subtracted=True,
-                       illumcor_done=illumcor_done)
+                       sky_already_subtracted=True)
 
 
 def _build_cube(spec2d_file: str, args: argparse.Namespace,
@@ -530,9 +528,8 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
                        spectrograph: Spectrograph,
                        targetx: np.ndarray, targety: np.ndarray,
                        raw_hdr, input_file: str,
-                       sky_already_subtracted: bool = False,
-                       illumcor_done: bool = False) -> None:
-    """Shared steps 2-7 for building a datacube from fiber spectra.
+                       sky_already_subtracted: bool = False) -> None:
+    """Shared steps for building a datacube from fiber spectra.
 
     Parameters
     ----------
@@ -555,9 +552,6 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     sky_already_subtracted : bool, optional
         If True, the flux arrays are already sky-subtracted (e.g. from
         spec1d) and sky subtraction is skipped.
-    illumcor_done : bool, optional
-        If True, the illumination correction has already been applied
-        (``ILLUMCOR`` header flag) and Step 2 is skipped.
     """
     import os
 
@@ -573,45 +567,7 @@ def _build_cube_common(det_fiber_data: dict, args: argparse.Namespace,
     from pypeit import log
 
     # ------------------------------------------------------------------
-    # Step 2: Apply fiber-to-fiber illumination correction
-    # ------------------------------------------------------------------
-    if illumcor_done:
-        log.info("  Illumination correction already applied (ILLUMCOR=True), "
-                 "skipping Step 2")
-    else:
-        for det_name, data in det_fiber_data.items():
-            det_num = int(det_name.replace('DET', ''))
-            nfibers = data['flux'].shape[0]
-            f_illum_all = spectrograph.load_fiber_illumination(det_num)
-
-            # Map each detected fiber to its reference profile index via
-            # fiber ID
-            fiber_meta = data['fiber_meta']
-            ref = spectrograph.load_fiber_ref_profile(det_num)
-            ref_ids = ref['FIB_ID']
-
-            f_illum = np.ones(nfibers)
-            for i in range(nfibers):
-                fid = fiber_meta['fiber_id'][i]
-                if fid < 0:
-                    continue
-                idx = np.where(ref_ids == fid)[0]
-                if len(idx) > 0 and idx[0] < len(f_illum_all):
-                    f_illum[i] = f_illum_all[idx[0]]
-
-            # Avoid division by zero for dead fibers
-            good = f_illum > 0.1
-            log.info(f"  {det_name}: applying fiber illumination correction "
-                     f"(range {f_illum[good].min():.3f} - "
-                     f"{f_illum[good].max():.3f})")
-            for i in range(nfibers):
-                if good[i]:
-                    data['flux'][i] /= f_illum[i]
-                    data['sky'][i] /= f_illum[i]
-                    data['ivar'][i] *= f_illum[i] ** 2
-
-    # ------------------------------------------------------------------
-    # Step 3: Identify sky fibers and sky-subtract
+    # Identify sky fibers and sky-subtract
     # ------------------------------------------------------------------
     for det_name, data in det_fiber_data.items():
         nfibers = data['flux'].shape[0]

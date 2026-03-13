@@ -97,36 +97,22 @@ extractions are performed.  The spec1d files can be inspected with
 Fiber illumination correction
 +++++++++++++++++++++++++++++
 
-The pipeline flat-fields at the pixel level but does not correct for
-relative fiber-to-fiber throughput differences.  The dedicated
-``pypeit_binospec_ifu_illumcorr`` script applies this correction
-directly to spec1d files using a pre-computed illumination map
-(``fiber_illumination.fits``).
+The pipeline applies two levels of fiber-to-fiber throughput correction
+during reduction:
 
-.. code-block:: bash
+1. **Dome-flat illumination correction**: The relative throughput from
+   flat field observations is baked into the pixel flat during
+   flat-fielding.
 
-   pypeit_binospec_ifu_illumcorr spec1d_*.fits
+2. **Sky-line illumination correction**: During joint sky subtraction,
+   the pipeline measures bright sky emission lines across all fibers
+   to derive a per-fiber throughput correction.  This accounts for the
+   different optical paths of sky fibers (bare fibers) versus science
+   fibers (lenslet-fed), which cannot be fully captured by dome flat
+   illumination alone.
 
-This divides each fiber's flux (and sky) by its relative throughput
-factor and multiplies the inverse variance accordingly.  The corrected
-spectra are written to new files with an ``_illumcorr`` suffix
-(e.g., ``spec1d_*_illumcorr.fits``).  Use ``--overwrite`` to modify the
-original files in place instead.
-
-The script sets the header keyword ``ILLUMCOR = True`` on the output
-files.  Both ``pypeit_binospec_ifu_illumcorr`` and
-``pypeit_binospec_ifu_cube`` check this flag to avoid applying the
-correction twice.
-
-If the spec1d files have already been flux-calibrated (i.e., contain
-``FLAM`` columns), the script will warn and skip them.  Use ``--force``
-to override this check.
-
-.. note::
-
-   This correction should be applied *before* flux calibration.  The
-   illumination correction is a spatial (fiber-to-fiber) effect, while
-   flux calibration is a spectral response correction.
+Both corrections are applied automatically by the pipeline and require
+no additional post-processing steps.
 
 Producing datacubes
 +++++++++++++++++++
@@ -156,16 +142,13 @@ dedicated sky fibers (``--use_fibers``).
 
 **Shared steps (both inputs):**
 
-1. Applies fiber-to-fiber throughput correction using a pre-computed
-   illumination map (skipped if the input spec1d file already has
-   ``ILLUMCOR = True``, e.g., from ``pypeit_binospec_ifu_illumcorr``)
-2. Identifies sky vs. science fibers via cross-correlation against a
+1. Identifies sky vs. science fibers via cross-correlation against a
    reference profile
-3. Resamples all fiber spectra onto a common linear wavelength grid
-4. Combines both detectors (up to 640 science fibers total)
-5. Maps each fiber to its on-sky position using the IFU layout
+2. Resamples all fiber spectra onto a common linear wavelength grid
+3. Combines both detectors (up to 640 science fibers total)
+4. Maps each fiber to its on-sky position using the IFU layout
    calibration file (``bino_IFU_sky_layout.fits``)
-6. Interpolates the irregularly-spaced fiber positions onto a regular
+5. Interpolates the irregularly-spaced fiber positions onto a regular
    spatial grid using ``scipy.interpolate.griddata``
 
 .. note::
@@ -176,14 +159,11 @@ dedicated sky fibers (``--use_fibers``).
 
 .. note::
 
-   The fiber-to-fiber throughput correction applied during cube building
-   is separate from the pipeline's pixel-level flat-fielding.  The
-   pipeline corrects pixel response but does not correct relative fiber
-   throughput (``use_illumflat = False``).  The correction can also be
-   applied directly to spec1d files using
-   ``pypeit_binospec_ifu_illumcorr`` (see above).  Spectral response
-   (flux calibration) from standard star observations is not yet
-   implemented.
+   Fiber-to-fiber throughput correction is handled entirely by the
+   pipeline (dome-flat illumination + sky-line correction during sky
+   subtraction).  No additional illumination correction is needed
+   before building datacubes.  Spectral response (flux calibration)
+   from standard star observations is not yet implemented.
 
 Basic usage
 ^^^^^^^^^^^
