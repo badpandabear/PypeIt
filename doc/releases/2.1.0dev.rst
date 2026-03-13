@@ -50,4 +50,5 @@ Bug Fixes
   :mod:`~pypeit.core.wavecal.wv_fitting`.
 - Fix an error in the platescale provided for 2D coadded data; the previous
   calculation did not account for the ``spat_samp_fact`` parameter.
-
+- Avoid a circular import by moving
+  :func:`~pypeit.loader.load_wmko_std_spectrum` to the dev-suite repo.
