@@ -1590,8 +1590,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
         For each sky line within the wavelength range, extracts boxcar
         flux per fiber, subtracts local continuum, and normalizes by
-        the median across fibers.  Interpolates between lines to build
-        a wavelength-dependent correction per fiber.
+        the median across fibers.  The per-fiber correction is the
+        median ratio across the 3 brightest usable lines (or fewer if
+        less than 3 are available).  The correction is wavelength-
+        independent; wavelength-dependent throughput variations should
+        be handled by spectral flux calibration from standard stars.
 
         Fibers with no valid line measurements (e.g. dead fibers) are
         left uncorrected (correction = 1.0).
@@ -1610,8 +1613,6 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             `numpy.ndarray`_: 2D correction image (same shape as
             sciimg).  Values > 1 for fibers brighter than median.
         """
-        from scipy.interpolate import interp1d
-
         nfibers = len(spat_ids)
 
         # Determine wavelength range from the data
@@ -1706,39 +1707,34 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             log.warning("No sky lines measured successfully; skipping "
                         "skyline illumination correction")
             return np.ones_like(sciimg)
-        sky_lines = sky_lines[usable_lines]
         line_ratios = line_ratios[usable_lines]
 
-        # Build wavelength-dependent correction per fiber.
-        # For fibers with missing measurements at some lines, use
-        # nearest valid value via fill_value extrapolation.
+        # Select the 3 brightest lines (by median flux across fibers)
+        # for a robust per-fiber correction
+        n_best = min(3, line_ratios.shape[0])
+        if n_best < line_ratios.shape[0]:
+            # Rank lines by number of valid fibers (proxy for brightness
+            # and reliability)
+            n_valid_per_line = np.sum(~np.isnan(line_ratios), axis=1)
+            best_idx = np.argsort(n_valid_per_line)[-n_best:]
+            line_ratios = line_ratios[best_idx]
+            log.info(f"Using {n_best} best-measured lines for correction")
+
+        # Build a single correction per fiber: median ratio across lines
         corr_2d = np.ones_like(sciimg)
         for i, spat_id in enumerate(spat_ids):
             slit_pix = slitmask == spat_id
             if not np.any(slit_pix):
                 continue
 
-            # Get this fiber's ratios across lines
             ratios_i = line_ratios[:, i]
             good_lines = ~np.isnan(ratios_i)
 
             if not np.any(good_lines):
                 continue
 
-            if np.sum(good_lines) == 1:
-                # Single line: constant correction
-                corr_val = ratios_i[good_lines][0]
-                corr_2d[slit_pix] = corr_val
-            else:
-                # Interpolate between lines
-                interp_func = interp1d(
-                    sky_lines[good_lines], ratios_i[good_lines],
-                    kind='linear', bounds_error=False,
-                    fill_value=(ratios_i[good_lines][0],
-                                ratios_i[good_lines][-1]))
-                # Get wavelength at each pixel in this fiber
-                wave_pix = waveimg[slit_pix]
-                corr_2d[slit_pix] = interp_func(wave_pix)
+            corr_val = np.median(ratios_i[good_lines])
+            corr_2d[slit_pix] = corr_val
 
         # Safety: clip extreme corrections
         corr_2d = np.clip(corr_2d, 0.3, 3.0)

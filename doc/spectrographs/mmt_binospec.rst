@@ -74,7 +74,8 @@ Reducing IFU data
 IFU data are reduced using the standard ``run_pypeit`` workflow.  PypeIt
 will automatically detect IFU frames from the ``MASK = 'IFU'`` header
 keyword.  Both detectors (``DET01`` for side A and ``DET02`` for side B)
-are processed and written to separate spec2d output files.
+are processed and written to separate extensions within a single spec2d
+output file.
 
 .. code-block:: bash
 
