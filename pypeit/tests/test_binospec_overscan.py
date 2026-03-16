@@ -4,7 +4,7 @@ Tests for Binospec overscan subtraction and nonlinearity correction.
 import numpy as np
 import pytest
 
-from pypeit.spectrographs.mmt_binospec import clean_overscan_vector
+from pypeit.spectrographs.mmt_binospec import clean_overscan_vector, binospec_read_amp
 
 
 class TestCleanOverscanVector:
@@ -53,3 +53,91 @@ class TestCleanOverscanVector:
         # Outlier should NOT be cleaned
         cleaned = clean_overscan_vector(vec, w=5, nsig=100.0)
         assert cleaned[10] == 200.0
+
+
+class TestBinospecReadAmpOverscan:
+    """Tests for overscan subtraction in binospec_read_amp."""
+
+    def _make_fake_amp_hdu(self, bias_level=1000.0, signal=500.0):
+        """Create a fake Binospec amplifier HDU with known overscan.
+
+        Layout matches real data: NAXIS1=2114, NAXIS2=2072,
+        DATASEC=[51:2098,1:2056].  The image is stored in standard
+        FITS orientation (not transposed).
+
+        The data section is filled with bias_level + signal.
+        The overscan regions contain only bias_level.
+        """
+        from astropy.io import fits as pyfits
+
+        nx, ny = 2114, 2072
+        img = np.full((ny, nx), bias_level, dtype=np.float32)
+        # Data section: cols 50:2098, rows 0:2056 (0-indexed)
+        img[0:2056, 50:2098] += signal
+
+        hdr = pyfits.Header()
+        hdr['DATASEC'] = '[51:2098,1:2056]'
+        hdr['DETSEC'] = '[1:2048,1:2056]'
+        hdr['NAXIS1'] = nx
+        hdr['NAXIS2'] = ny
+
+        hdu_primary = pyfits.PrimaryHDU()
+        hdu_ext = pyfits.ImageHDU(data=img, header=hdr)
+        hdulist = pyfits.HDUList([hdu_primary, hdu_ext])
+        return hdulist
+
+    def test_bias_subtracted(self):
+        """Overscan subtraction should remove the bias level."""
+        bias = 1000.0
+        signal = 500.0
+        hdulist = self._make_fake_amp_hdu(bias_level=bias, signal=signal)
+        data, overscan, datasec, biassec = binospec_read_amp(hdulist, 1)
+
+        # After overscan subtraction, data section should be close to
+        # signal only (bias removed)
+        med_data = np.median(data)
+        assert abs(med_data - signal) < 5.0, \
+            f"Bias not removed: median={med_data}, expected ~{signal}"
+
+    def test_output_shape(self):
+        """Output data should have datasec dimensions (2048 x 2056)."""
+        hdulist = self._make_fake_amp_hdu()
+        data, overscan, datasec, biassec = binospec_read_amp(hdulist, 1)
+        # Note: binospec_read_amp transposes the image, so shape is
+        # (x, y) = (2048, 2056) after cropping to datasec
+        assert data.shape == (2048, 2056), f"Unexpected shape: {data.shape}"
+
+    def test_zero_fake_overscan(self):
+        """Returned overscan should be all zeros (fake)."""
+        hdulist = self._make_fake_amp_hdu()
+        data, overscan, datasec, biassec = binospec_read_amp(hdulist, 1)
+        assert np.all(overscan == 0), "Overscan should be fake zeros"
+
+    def test_row_dependent_bias_removed(self):
+        """Row-dependent bias structure should be removed by overscan."""
+        from astropy.io import fits as pyfits
+
+        nx, ny = 2114, 2072
+        # Create a bias pattern that varies along FITS rows (axis 0)
+        row_bias = np.linspace(990, 1010, ny).astype(np.float32)
+        img = np.broadcast_to(row_bias[:, None], (ny, nx)).copy()
+        # Add signal to data section
+        img[0:2056, 50:2098] += 500.0
+
+        hdr = pyfits.Header()
+        hdr['DATASEC'] = '[51:2098,1:2056]'
+        hdr['DETSEC'] = '[1:2048,1:2056]'
+        hdr['NAXIS1'] = nx
+        hdr['NAXIS2'] = ny
+        hdu_primary = pyfits.PrimaryHDU()
+        hdu_ext = pyfits.ImageHDU(data=img, header=hdr)
+        hdulist = pyfits.HDUList([hdu_primary, hdu_ext])
+
+        data, _, _, _ = binospec_read_amp(hdulist, 1)
+
+        # After overscan subtraction, the row-dependent bias pattern
+        # should be mostly removed. Check that the row-wise variation
+        # in the data is much less than the original 20 ADU range.
+        col_medians = np.median(data, axis=0)  # median along x for each y
+        assert np.ptp(col_medians) < 5.0, \
+            f"Row-dependent bias not removed: range={np.ptp(col_medians)}"

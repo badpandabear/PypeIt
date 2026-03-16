@@ -16,6 +16,7 @@ from IPython import embed
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import numpy as np
+from astropy.stats import sigma_clipped_stats
 from scipy.ndimage import median_filter
 
 from pypeit import io
@@ -1120,26 +1121,36 @@ def binospec_read_amp(inp, ext):
     x1, x2, y1, y2 = chain.from_iterable(parse.load_sections(datasec, fmt_iraf=False))
     datasec = f'[{x1-1}:{x2},{y1-1}:{y2}]'
 
-    # NOTE: Since pypeit can only subtract overscan along one axis, I'm subtract
-    # the overscan here using median method.
-    # Overscan X-axis
+    # Overscan subtraction following IDL pipeline (bino_mosaic.pro):
+    # Y-axis first, then X-axis. Uses sigma-clipped mean (resistant_mean)
+    # with outlier cleaning, matching IDL defaults (clean_w=9, clean_nsig=1.0).
+
+    # Y-axis overscan: postscan rows after datasec
+    if y2 < nyt:
+        overscan_y = temp[:, y2:nyt]
+        overscan_vec, _, _ = sigma_clipped_stats(overscan_y, sigma=3.0, axis=1)
+        overscan_vec = clean_overscan_vector(overscan_vec, w=9, nsig=1.0)
+        temp = temp - overscan_vec[:, None]
+
+    # X-axis overscan: prescan + postscan columns
+    overscan_x_regions = []
     if x1 > 1:
-        overscanx = temp[2:x1-1, :]
-        overscanx_vec = np.median(overscanx, axis=0)
-        temp = temp - overscanx_vec[None,:]
+        overscan_x_regions.append(temp[0:x1-1, :])
+    if x2 < nxt:
+        overscan_x_regions.append(temp[x2:nxt, :])
+    if len(overscan_x_regions) > 0:
+        overscan_x = np.concatenate(overscan_x_regions, axis=0)
+        overscan_x_vec, _, _ = sigma_clipped_stats(overscan_x, sigma=3.0, axis=0)
+        overscan_x_vec = clean_overscan_vector(overscan_x_vec, w=9, nsig=1.0)
+        temp = temp - overscan_x_vec[None, :]
+
+    # Crop to datasec
     data = temp[x1-1:x2, y1-1:y2]
 
-    ## Overscan Y-axis
-    if y2 < nyt:
-        os1, os2 = y2+1, nyt-1
-        overscany = temp[x1 - 1:x2, y2:os2]
-        overscany_vec = np.median(overscany, axis=1)
-        data = data -  overscany_vec[:,None]
-
-    # Overscan
+    # Fake overscan for PypeIt's general pipeline (effectively a no-op)
     biassec = f'[0:{x1-1},{y1-1}:{y2}]'
     xos1, xos2, yos1, yos2 = chain.from_iterable(parse.load_sections(biassec, fmt_iraf=False))
-    overscan = np.zeros_like(temp[xos1:xos2, yos1:yos2]) # Give a zero fake overscan at the edge of each amplifiers
+    overscan = np.zeros_like(temp[xos1:xos2, yos1:yos2])
 
     return data, overscan, datasec, biassec
 
