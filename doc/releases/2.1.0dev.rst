@@ -19,13 +19,39 @@ Dependency Changes
 Functionality/Performance Improvements and Additions
 ----------------------------------------------------
 
+- Added a new ``Fiber`` pypeline for fiber-fed spectrographs, where each fiber
+  is treated as a distinct object without peak-detection object finding.  The
+  pypeline dispatch system (``FiberFindObjects``, ``FiberExtract``) follows the
+  existing class-name convention.
+
 
 Instrument-specific Updates
 ---------------------------
 
+- Added support for the MMT Binospec IFU (``mmt_binospec_ifu``), a fiber-fed
+  integral field unit with ~360 fibers per detector side.  This introduces the
+  new ``Fiber`` pypeline for fiber-fed spectrographs, with dedicated
+  :class:`~pypeit.find_objects.FiberFindObjects` and
+  :class:`~pypeit.extraction.FiberExtract` classes.  Key features include:
+
+  - Joint sky subtraction across all fibers using dedicated sky fibers
+  - Sky-line-based per-fiber throughput correction to account for the
+    different optical paths of bare sky fibers vs. lenslet-fed science fibers
+  - Fiber identification via cross-correlation against a reference profile
+  - Boxcar and optimal (Horne 1986) extraction with empirical spatial
+    profiles from the flat field
+  - A dedicated ``pypeit_binospec_ifu_cube`` script for building datacubes
+    from fiber spectra
+
+  See the :ref:`mmt_binospec` documentation for details.
+
 
 Script Changes
 --------------
+
+- Added ``pypeit_binospec_ifu_cube`` for building datacubes from Binospec IFU
+  spec1d or spec2d files.  Accepts both file types, combines both detector
+  sides, and produces FITS datacubes with 3-axis WCS.
 
 
 Testing
