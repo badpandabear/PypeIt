@@ -16,6 +16,7 @@ from IPython import embed
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import numpy as np
+from scipy.ndimage import median_filter
 
 from pypeit import io
 from pypeit import log
@@ -1036,6 +1037,48 @@ def _plot_region(ax, region, color, side_label):
     ax.set_aspect("equal")
     ax.grid(True)
     ax.legend()
+
+
+def clean_overscan_vector(overscan, w=9, nsig=1.0, rdnoise=4.0):
+    """
+    Clean a 1D overscan vector by median-filtering and interpolating
+    over outliers.
+
+    Replicates the IDL ``clean_overscan_vector`` function from
+    ``bino_mosaic.pro``.
+
+    Parameters
+    ----------
+    overscan : `numpy.ndarray`_
+        1D overscan vector to clean.
+    w : :obj:`int`, optional
+        Window size for median filtering. Must be >= 3. Default is 9.
+    nsig : :obj:`float`, optional
+        Sigma threshold for outlier rejection. Pixels deviating from
+        the median-filtered vector by more than ``nsig * rdnoise`` are
+        replaced by interpolation. Default is 1.0.
+    rdnoise : :obj:`float`, optional
+        Read noise in ADU, used to set the outlier threshold.
+        Default is 4.0.
+
+    Returns
+    -------
+    clean : `numpy.ndarray`_
+        Cleaned overscan vector with outliers interpolated over.
+    """
+    w = max(w, 3)
+    m_overscan = median_filter(overscan, size=w, mode='reflect')
+    bad = np.abs(overscan - m_overscan) > rdnoise * nsig
+    good = ~bad
+    if not np.any(bad):
+        return overscan.copy()
+    if not np.any(good):
+        return overscan.copy()
+    clean = overscan.copy()
+    good_idx = np.where(good)[0]
+    bad_idx = np.where(bad)[0]
+    clean[bad_idx] = np.interp(bad_idx, good_idx, overscan[good_idx])
+    return clean
 
 
 def binospec_read_amp(inp, ext):
