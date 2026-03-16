@@ -38,6 +38,22 @@ class MMTBINOSPECSpectrograph(spectrograph.Spectrograph):
     """
     ndet = 2
     name = 'mmt_binospec'
+
+    # Per-amplifier nonlinearity correction coefficients from IDL calibration
+    # file (scicam_bino_sep2017.fits, measured 2017-09). Polynomial form:
+    # C_corr = c[0] + c[1]*C + c[2]*C^2 + c[3]*C^3 + c[4]*C^4
+    # Compatible with np.polynomial.polynomial.polyval.
+    # Shape: (8 amplifiers, 5 coefficients for degree-4 polynomial)
+    nonlinearity_coeffs = np.array([
+        [0.00000000e+00, 1.00400089e+00, -1.39235362e-06, 8.31711824e-12, -1.20653479e-17],
+        [0.00000000e+00, 1.00361458e+00, -1.29223833e-06, 6.93723177e-12, -9.67406255e-18],
+        [0.00000000e+00, 1.00269542e+00, -9.29361806e-07, 5.97902827e-12, -2.30257302e-17],
+        [0.00000000e+00, 1.00339616e+00, -8.47134521e-07, 7.92441693e-12, -4.46542834e-17],
+        [0.00000000e+00, 1.00727205e+00, -1.69093388e-06, 2.07225055e-11, -1.62655178e-16],
+        [0.00000000e+00, 1.00858745e+00, -2.35668901e-06, 2.40641019e-11, -1.50286358e-16],
+        [0.00000000e+00, 1.00728526e+00, -1.80779473e-06, 1.73427719e-11, -1.01685780e-16],
+        [0.00000000e+00, 1.00845168e+00, -2.02050567e-06, 2.97587091e-11, -2.65508521e-16],
+    ])
     telescope = telescopes.MMTTelescopePar()
     camera = 'BINOSPEC'
     url = 'https://lweb.cfa.harvard.edu/mmti/binospec.html'
@@ -1146,6 +1162,10 @@ def binospec_read_amp(inp, ext):
 
     # Crop to datasec
     data = temp[x1-1:x2, y1-1:y2]
+
+    # Apply per-amplifier nonlinearity correction (IDL: poly(im_cur, c_poly))
+    data = np.polynomial.polynomial.polyval(
+        data, MMTBINOSPECSpectrograph.nonlinearity_coeffs[ext - 1])
 
     # Fake overscan for PypeIt's general pipeline (effectively a no-op)
     biassec = f'[0:{x1-1},{y1-1}:{y2}]'

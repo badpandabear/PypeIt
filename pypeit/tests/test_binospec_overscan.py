@@ -4,7 +4,9 @@ Tests for Binospec overscan subtraction and nonlinearity correction.
 import numpy as np
 import pytest
 
-from pypeit.spectrographs.mmt_binospec import clean_overscan_vector, binospec_read_amp
+from pypeit.spectrographs.mmt_binospec import (clean_overscan_vector,
+                                                binospec_read_amp,
+                                                MMTBINOSPECSpectrograph)
 
 
 class TestCleanOverscanVector:
@@ -141,3 +143,62 @@ class TestBinospecReadAmpOverscan:
         col_medians = np.median(data, axis=0)  # median along x for each y
         assert np.ptp(col_medians) < 5.0, \
             f"Row-dependent bias not removed: range={np.ptp(col_medians)}"
+
+
+class TestNonlinearityCorrection:
+    """Tests for per-amplifier nonlinearity correction."""
+
+    def test_coefficients_shape(self):
+        """Nonlinearity coefficients should be 8x5 (8 amps, degree 4)."""
+        coeffs = MMTBINOSPECSpectrograph.nonlinearity_coeffs
+        assert coeffs.shape == (8, 5)
+
+    def test_coefficients_zero_constant(self):
+        """All constant terms should be zero."""
+        coeffs = MMTBINOSPECSpectrograph.nonlinearity_coeffs
+        np.testing.assert_array_equal(coeffs[:, 0], 0.0)
+
+    def test_coefficients_near_unity_linear(self):
+        """Linear terms should be close to 1.0 (small correction)."""
+        coeffs = MMTBINOSPECSpectrograph.nonlinearity_coeffs
+        assert np.all(np.abs(coeffs[:, 1] - 1.0) < 0.01)
+
+    def test_correction_applied_in_read_amp(self):
+        """binospec_read_amp should apply nonlinearity correction."""
+        from astropy.io import fits as pyfits
+
+        nx, ny = 2114, 2072
+        bias_level = 1000.0
+        signal = 10000.0
+        img = np.full((ny, nx), bias_level, dtype=np.float32)
+        # Data section gets bias + signal; overscan has only bias
+        img[0:2056, 50:2098] += signal
+
+        hdr = pyfits.Header()
+        hdr['DATASEC'] = '[51:2098,1:2056]'
+        hdr['DETSEC'] = '[1:2048,1:2056]'
+        hdr['NAXIS1'] = nx
+        hdr['NAXIS2'] = ny
+        hdu_primary = pyfits.PrimaryHDU()
+        hdu_ext = pyfits.ImageHDU(data=img, header=hdr)
+        hdulist = pyfits.HDUList([hdu_primary, hdu_ext])
+
+        data, _, _, _ = binospec_read_amp(hdulist, 1)
+
+        # After overscan subtraction, data ~ signal. Nonlinearity
+        # correction then maps signal -> polyval(signal, coeffs).
+        coeffs = MMTBINOSPECSpectrograph.nonlinearity_coeffs[0]
+        expected = np.polynomial.polynomial.polyval(signal, coeffs)
+        med_data = np.median(data)
+        assert abs(med_data - expected) < 5.0, \
+            f"Nonlinearity not applied: got {med_data}, expected ~{expected}"
+
+    def test_correction_is_small(self):
+        """At typical science levels (~1000 ADU), correction < 1%."""
+        coeffs = MMTBINOSPECSpectrograph.nonlinearity_coeffs
+        test_counts = 1000.0
+        for i in range(8):
+            corrected = np.polynomial.polynomial.polyval(test_counts, coeffs[i])
+            ratio = corrected / test_counts
+            assert 0.99 < ratio < 1.01, \
+                f"Amp {i+1}: correction too large: {ratio}"
