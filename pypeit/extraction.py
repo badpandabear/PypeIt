@@ -1034,9 +1034,9 @@ class FiberExtract(Extract):
             sobj_inmask = inmask & thismask
 
             # Boxcar extraction using existing infrastructure
-            extract.extract_boxcar(
+            sobj.extract_boxcar(
                 imgminsky, self.sciImg.ivar, sobj_inmask,
-                self.waveimg, extract_sky, sobj,
+                self.waveimg, extract_sky,
                 fwhmimg=self.fwhmimg, flatimg=self.flatimg,
                 base_var=self.sciImg.base_var,
                 count_scale=self.sciImg.img_scale,
