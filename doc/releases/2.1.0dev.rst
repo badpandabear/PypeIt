@@ -51,6 +51,9 @@ Instrument-specific Updates
   per-amplifier nonlinearity correction using degree-4 polynomial coefficients
   from the IDL calibration file.
 
+- Enabled scattered light correction for MMT Binospec IFU mode using PypeIt's
+  parametric kernel model, fitting to inter-fiber gap pixels.
+
 - Updated the MMT Binospec bad pixel mask to match the IDL pipeline, adding
   ~12,500 individual bad pixels, additional bad columns, and detector trap
   region masking from static calibration files.

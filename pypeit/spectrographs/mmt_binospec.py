@@ -1348,6 +1348,12 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['calibrations']['slitedges']['fwhm_gaussian'] = 2.0
         par['calibrations']['slitedges']['min_edge_side_sep'] = 1.0
 
+        # Scattered light correction: model fit to inter-fiber gap pixels
+        par['calibrations']['scattlight_pad'] = 5
+        par['calibrations']['pixelflatframe']['process']['subtract_scattlight'] = True
+        par['calibrations']['illumflatframe']['process']['subtract_scattlight'] = True
+        par['scienceframe']['process']['subtract_scattlight'] = True
+
         # Flat field: no edge tweaking for fiber-fed IFU (fixed positions)
         par['calibrations']['flatfield']['tweak_slits'] = False
         par['calibrations']['flatfield']['slit_trim'] = 0
