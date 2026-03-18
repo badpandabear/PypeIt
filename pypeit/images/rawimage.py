@@ -543,7 +543,8 @@ class RawImage:
             raise PypeItError('No bias available for bias subtraction!')
         if self.par['use_darkimage'] and dark is None:
             raise PypeItError('No dark available for dark subtraction!')
-        if self.par['subtract_scattlight'] and scattlight is None:
+        if self.par['subtract_scattlight'] and scattlight is None \
+                and self.par['scattlight']['method'] not in ['frame', 'archive']:
             raise PypeItError('Scattered light subtraction requested, but scattered light model not provided.')
         if self.par['spat_flexure_correct'] and slits is None:
             raise PypeItError('Spatial flexure correction requested but no slits provided.')
@@ -1255,8 +1256,12 @@ class RawImage:
                                f"set 'scattlight_method' to another option.")
                 scatt_img = scattlight.scattered_light_model(arx_modpar, _img)
             elif self.par["scattlight"]["method"] == "frame":
-                # Calculate a model specific for this frame
-                pad = msscattlight.pad // spatbin
+                # Calculate a model specific for this frame.
+                # Use pad from the scattlight calibration if available,
+                # otherwise fall back to finecorr_pad.
+                _pad = msscattlight.pad if msscattlight is not None \
+                    else self.par['scattlight']['finecorr_pad']
+                pad = _pad // spatbin
                 offslitmask = slits.slit_img(pad=pad, flexure=None) == -1
                 # Get starting parameters for the scattered light model
                 x0, bounds = self.spectrograph.scattered_light_archive(binning, dispname)
