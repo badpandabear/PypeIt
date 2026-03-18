@@ -1296,8 +1296,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             `numpy.ndarray`_: Boolean array with the flags selecting the
             exposures in ``fitstbl`` that are ``ftype`` type frames.
         """
-        # Use parent frame typing logic, then restrict to IFU frames only
-        is_type = super().check_frame_type(ftype, fitstbl, exprng=exprng)
+        # Use parent frame typing logic, then restrict to IFU frames only.
+        # Map scattlight to pixelflat (high-count flat provides the best
+        # scattered light model).
+        _ftype = 'pixelflat' if ftype == 'scattlight' else ftype
+        is_type = super().check_frame_type(_ftype, fitstbl, exprng=exprng)
         is_ifu = np.array([d.strip().upper() == 'IFU' for d in fitstbl['decker']])
         return is_type & is_ifu
 
