@@ -1187,7 +1187,7 @@ class RawImage:
             log.warning("The scattered light has already been subtracted from the image!")
             return
 
-        if self.par["scattlight"]["method"] == "model" and msscattlight.scattlight_param is None:
+        if self.par["scattlight"]["method"] == "model" and (msscattlight is None or msscattlight.scattlight_param is None):
             log.warning("Scattered light parameters are not set. Cannot perform scattered light subtraction.")
             return
 
@@ -1208,12 +1208,12 @@ class RawImage:
             # Replace all bad pixels with the nearest good pixel
             full_bpm = self.bpm[ii, ...] | crmask
             _img = utils.replace_bad(self.image[ii, ...], full_bpm)
-            # Get a copy of the best-fitting model parameters
-            this_modpar = msscattlight.scattlight_param.copy()
-            this_modpar[8] = 0.0  # This is the zero-level of the scattlight frame. The zero-level is determined by the finecorr
             # Apply the requested method for the scattered light
             do_finecorr = self.par["scattlight"]["finecorr_method"] is not None
             if self.par["scattlight"]["method"] == "model":
+                # Get a copy of the best-fitting model parameters
+                this_modpar = msscattlight.scattlight_param.copy()
+                this_modpar[8] = 0.0  # This is the zero-level of the scattlight frame. The zero-level is determined by the finecorr
                 # Use predefined model parameters
                 scatt_img = scattlight.scattered_light_model_pad(this_modpar, _img)
                 if debug:
@@ -1272,7 +1272,9 @@ class RawImage:
                 if not success:
                     if msscattlight is not None:
                         log.warning("Scattered light model failed - using predefined model parameters")
-                        scatt_img = scattlight.scattered_light_model(this_modpar, _img)
+                        fallback_modpar = msscattlight.scattlight_param.copy()
+                        fallback_modpar[8] = 0.0
+                        scatt_img = scattlight.scattered_light_model(fallback_modpar, _img)
                     else:
                         log.warning("Scattered light model failed - using archival model parameters")
                         # Use archival model parameters
