@@ -307,6 +307,7 @@ def _build_cube_from_spec1d(spec1d_file: str, args: argparse.Namespace,
         fiber_wave = np.zeros((nfibers, nspec))
         fiber_sky = np.zeros((nfibers, nspec))
         spat_ids = np.zeros(nfibers, dtype=int)
+        slit_centers = np.zeros(nfibers, dtype=float)
 
         for i, sobj in enumerate(det_sobjs):
             fiber_wave[i] = getattr(sobj, wave_key)
@@ -316,10 +317,12 @@ def _build_cube_from_spec1d(spec1d_file: str, args: argparse.Namespace,
             if sky is not None:
                 fiber_sky[i] = sky
             spat_ids[i] = sobj.SLITID
+            slit_centers[i] = sobj.SPAT_PIXPOS
 
-        # Get fiber metadata
+        # Get fiber metadata (pass float centers for sub-pixel accuracy)
         fiber_meta = spectrograph.get_fiber_metadata(
-            int(det_name.replace('DET', '')), spat_ids)
+            int(det_name.replace('DET', '')), spat_ids,
+            slit_centers=slit_centers)
 
         det_fiber_data[det_name] = {
             'flux': fiber_flux,
@@ -495,9 +498,13 @@ def _build_cube(spec2d_file: str, args: argparse.Namespace,
                     # Horne Eq. 9: var = sum(P) / sum(P^2 * ivar)
                     fiber_ivar[i, row] = denom / np.sum(profile[good_iv])
 
-        # Get fiber metadata (IDs, names, types) from the spectrograph
+        # Get fiber metadata (IDs, names, types) from the spectrograph.
+        # Pass float slit centers for sub-pixel matching accuracy.
+        slit_mid = nspec // 2
+        slit_centers = trace_centers[slit_mid, :]
         fiber_meta = spectrograph.get_fiber_metadata(
-            int(det_name.replace('DET', '')), spat_ids)
+            int(det_name.replace('DET', '')), spat_ids,
+            slit_centers=slit_centers)
 
         det_fiber_data[det_name] = {
             'flux': fiber_flux,

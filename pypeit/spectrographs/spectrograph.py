@@ -837,7 +837,7 @@ class Spectrograph:
         raise PypeItError('This spectrograph does not support the use of mask design. '
                    'Set `use_maskdesign=False`')
 
-    def get_fiber_metadata(self, det, slit_spat_ids):
+    def get_fiber_metadata(self, det, slit_spat_ids, slit_centers=None):
         """
         Return fiber identification metadata for a fiber-fed spectrograph.
 
@@ -852,6 +852,10 @@ class Spectrograph:
         slit_spat_ids : `numpy.ndarray`_
             Array of ``spat_id`` values for each detected slit/fiber,
             shape ``(nslits,)``.
+        slit_centers : `numpy.ndarray`_, optional
+            Float-valued slit center positions at the spectral midpoint.
+            If provided, subclasses may use these for more accurate
+            fiber matching than the integer ``slit_spat_ids``.
 
         Returns
         -------

@@ -1441,9 +1441,14 @@ class FiberFindObjects(SlicerIFUFindObjects):
         boxcar_rad = self.par['reduce']['extraction']['boxcar_radius'] \
             / self.get_platescale()
 
-        # Query instrument for fiber metadata (IDs, names, types)
+        # Query instrument for fiber metadata (IDs, names, types).
+        # Pass float slit centers for sub-pixel matching accuracy.
+        nspec_slit = self.slits_left.shape[0]
+        slit_mid = nspec_slit // 2
+        slit_centers = (self.slits_left[slit_mid, :] +
+                        self.slits_right[slit_mid, :]) / 2.0
         fiber_meta = self.spectrograph.get_fiber_metadata(
-            self.det, self.slits.spat_id)
+            self.det, self.slits.spat_id, slit_centers=slit_centers)
 
         for slit_idx in gdslits:
             slit_spat_id = self.slits.spat_id[slit_idx]

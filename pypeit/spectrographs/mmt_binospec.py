@@ -1939,15 +1939,42 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
                  f"(det={det})")
         return layout_indices
 
+    def _load_ref_spatial_profile(self, det):
+        """
+        Load the reference spatial profile for cross-correlation.
+
+        The reference profile (PROF_REF) is a 1D array representing the
+        summed Gaussian-Hermite profiles of all fibers, stored in
+        extension 3 (IFUPROF) of the reference fiber profile FITS file.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+
+        Returns:
+            `numpy.ndarray`_: 1D reference spatial profile.
+        """
+        ref_file = self._ifu_calib_path() / 'fiber_ref_profile.fits'
+        side_idx = 0 if det == 1 else 1
+        with fits.open(ref_file) as hdu:
+            prof_data = hdu[3].data
+            return prof_data['PROF_REF'][side_idx].copy()
+
     def match_fibers_to_reference(self, det, detected_positions):
         """
         Cross-match detected fiber trace positions against the reference
         profile to assign physical fiber IDs.
 
-        Uses the algorithm from the IDL pipeline (bino_ifu_fiber_id.pro):
-        compute cross-correlation between the detected fiber positions
-        and the reference profile, then match individual fibers using a
-        distance threshold.
+        Follows the algorithm from the IDL pipeline
+        (bino_ifu_fiber_id.pro):
+
+        1. Build a synthetic spatial profile from detected positions.
+        2. Cross-correlate against the reference profile in 5 segments
+           with cosine apodization.
+        3. Fit a linear polynomial to the segment offsets to capture
+           position-dependent shifts (flexure, scale, distortion).
+        4. Match individual fibers using a distance threshold after
+           applying the per-trace polynomial shift.
 
         Args:
             det (:obj:`int`):
@@ -1968,56 +1995,168 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         ref_positions = ref['TR_PIX']
         ref_ids = ref['FIB_ID']
         ref_dead = ref['FIB_DEAD_FLAG'].astype(bool)
-        nfibers = self.nfibers_a if det == 1 else self.nfibers_b
+        ref_names = np.char.strip(ref['FIB_NAME'])
 
-        # Compute global offset via cross-correlation of position histograms
-        # (simplified version of the IDL 5-segment approach)
-        nbins = 4200  # slightly larger than detector width
-        ref_hist = np.zeros(nbins)
-        det_hist = np.zeros(nbins)
-        for pos in ref_positions[~ref_dead]:
-            idx = int(np.round(pos))
-            if 0 <= idx < nbins:
-                ref_hist[idx] = 1.0
+        # Load the reference spatial profile (from ext 3 of the FITS file)
+        ref_profile = self._load_ref_spatial_profile(det)
+        nx = len(ref_profile)
+
+        # Build a synthetic spatial profile from detected positions
+        # using Gaussians with typical fiber width (sigma ~ 1.25 px)
+        sigma = 1.25
+        xvec = np.arange(nx, dtype=float)
+        det_profile = np.zeros(nx)
         for pos in detected_positions:
-            idx = int(np.round(pos))
-            if 0 <= idx < nbins:
-                det_hist[idx] = 1.0
+            ipos = int(np.round(pos))
+            # Only compute Gaussian within +/- 5 sigma for efficiency
+            hw = int(5 * sigma) + 1
+            lo = max(0, ipos - hw)
+            hi = min(nx, ipos + hw + 1)
+            if lo < hi:
+                det_profile[lo:hi] += np.exp(
+                    -0.5 * ((xvec[lo:hi] - pos) / sigma) ** 2)
 
-        # Cross-correlate to find global shift
-        corr = np.correlate(det_hist, ref_hist, mode='full')
-        lag = np.arange(len(corr)) - (nbins - 1)
-        # Search within +/- 50 pixels
-        mask = np.abs(lag) < 50
-        best_lag = lag[mask][np.argmax(corr[mask])]
+        # 5-segment cross-correlation (following IDL bino_ifu_fiber_id.pro)
+        M = 80          # maximum lag (+/- pixels)
+        n_seg = 5
+        overlap = 0.1
+        skippix1 = 150  # skip edge pixels
+        skippix2 = 150
 
-        # Match fibers using distance threshold (1.7 pixels, from IDL pipeline)
-        dx_thr = 1.7
-        shifted_ref = ref_positions + best_lag
+        x_seg = np.zeros(n_seg)
+        c_seg = np.full(n_seg, np.nan)
+
+        for iseg in range(n_seg):
+            # Segment boundaries with overlap (matching IDL logic)
+            seg_width = (nx - skippix1 - skippix2) / n_seg
+            if iseg == 0:
+                nmin = skippix1
+            else:
+                nmin = int(skippix1 + (iseg - overlap) * seg_width)
+            nmin = max(nmin, 0)
+
+            if iseg == n_seg - 1:
+                nmax = nx - skippix2 - 1
+            else:
+                nmax = int(skippix1 + (iseg + 1.0 + overlap) * seg_width)
+            nmax = min(nmax, nx - 1)
+
+            x_seg[iseg] = (nmax + nmin) / 2.0
+
+            # Cosine apodization window
+            seg_len = nmax - nmin + 1
+            ntaper = 10
+            c_ap = np.ones(seg_len)
+            taper = 0.5 * (1 - np.cos(np.pi * np.arange(ntaper) / ntaper))
+            c_ap[:ntaper] = taper
+            c_ap[-ntaper:] = taper[::-1]
+
+            # Apply apodization to absolute values (like IDL)
+            seg_det = np.abs(det_profile[nmin:nmax + 1]) * c_ap
+            seg_ref = np.abs(ref_profile[nmin:nmax + 1]) * c_ap
+
+            # Cross-correlate and extract +/- M lag range
+            corr = np.correlate(seg_det, seg_ref, mode='full')
+            n = len(seg_det)
+            lag = np.arange(len(corr)) - (n - 1)
+            lag_mask = np.abs(lag) <= M
+            corr_sub = corr[lag_mask]
+            lag_sub = lag[lag_mask]
+
+            # Normalize
+            norm = np.sqrt(np.sum(seg_det ** 2) * np.sum(seg_ref ** 2))
+            if norm > 0:
+                corr_sub = corr_sub / norm
+
+            max_idx = np.argmax(corr_sub)
+            max_val = corr_sub[max_idx]
+
+            # Quality check and sub-pixel peak fit (like IDL)
+            dx_cpeak = 4
+            if (max_val >= 0.3
+                    and max_idx > dx_cpeak
+                    and max_idx < len(corr_sub) - dx_cpeak):
+                # Parabolic sub-pixel interpolation
+                left = corr_sub[max_idx - 1]
+                center = corr_sub[max_idx]
+                right = corr_sub[max_idx + 1]
+                denom = left - 2 * center + right
+                if denom != 0:
+                    delta = 0.5 * (left - right) / denom
+                else:
+                    delta = 0.0
+                c_seg[iseg] = lag_sub[max_idx] + delta
+
+        # Fit linear polynomial to segment offsets
+        valid = np.isfinite(c_seg)
+        n_valid = np.sum(valid)
+        if n_valid >= 2:
+            poly_coeff = np.polyfit(x_seg[valid], c_seg[valid], 1)
+        elif n_valid == 1:
+            poly_coeff = np.array([0.0, c_seg[valid][0]])
+        else:
+            log.warning("All cross-correlation segments failed; "
+                        "falling back to zero offset")
+            poly_coeff = np.array([0.0, 0.0])
+
+        # Two-pass iterative matching (following IDL bino_ifu_fiber_id.pro):
+        # Pass 1: match with 1.7 px threshold using cross-correlation polynomial
+        # Pass 2: refit polynomial from matched pairs, then match remaining
+        #         fibers with relaxed 3.5 px threshold to catch physically
+        #         displaced fibers (broken/swapped bundles on DET02)
+        dx_thr_tight = 1.7
+        dx_thr_relaxed = 3.5
         fiber_ids = np.full(len(detected_positions), -1, dtype=int)
         matched = np.zeros(len(ref_positions), dtype=bool)
 
-        for i, dpos in enumerate(detected_positions):
-            dists = np.abs(shifted_ref - dpos)
-            dists[matched] = np.inf
-            best = np.argmin(dists)
-            if dists[best] < dx_thr:
-                fiber_ids[i] = ref_ids[best]
-                matched[best] = True
+        for pass_num, dx_thr in enumerate([dx_thr_tight, dx_thr_relaxed]):
+            # Evaluate per-trace shift from the polynomial
+            dx_all = np.polyval(poly_coeff, detected_positions)
 
-        # Determine sky fiber status from matched IDs (using 1-based fiber IDs)
-        is_sky = np.isin(fiber_ids, self.sky_fiber_ids) & (fiber_ids >= 0)
+            for i, dpos in enumerate(detected_positions):
+                if fiber_ids[i] >= 0:
+                    continue    # already matched
+                # Distance = |detected_pos - shift - ref_pos|
+                dists = np.abs(dpos - dx_all[i] - ref_positions)
+                dists[matched] = np.inf
+                dists[ref_dead] = np.inf    # exclude dead fibers
+                best = np.argmin(dists)
+                if dists[best] < dx_thr:
+                    fiber_ids[i] = ref_ids[best]
+                    matched[best] = True
+
+            # After pass 1, refit polynomial using matched pairs for
+            # a more accurate alignment before the relaxed pass
+            if pass_num == 0:
+                matched_det = detected_positions[fiber_ids >= 0]
+                matched_ref_pos = np.array([
+                    ref_positions[np.where(ref_ids == fid)[0][0]]
+                    for fid in fiber_ids if fid >= 0])
+                offsets = matched_det - matched_ref_pos
+                if len(offsets) >= 2:
+                    poly_coeff = np.polyfit(matched_det, offsets, 1)
+
+        # Determine sky fiber status from reference fiber names
+        # (the FIB_TYPE field is unreliable; use FIB_NAME instead)
+        is_sky = np.zeros(len(detected_positions), dtype=bool)
+        for i in range(len(detected_positions)):
+            if fiber_ids[i] >= 0:
+                idx = np.where(ref_ids == fiber_ids[i])[0]
+                if len(idx) > 0:
+                    is_sky[i] = ref_names[idx[0]].startswith('SKY')
 
         # Dead fibers: reference fibers that were not matched
         is_dead = ~matched & ~ref_dead
 
-        log.info(f"Fiber matching: {np.sum(fiber_ids >= 0)}/{len(detected_positions)} "
-                 f"detected traces matched to reference ({np.sum(is_sky)} sky fibers, "
+        n_matched = np.sum(fiber_ids >= 0)
+        log.info(f"Fiber matching: {n_matched}/{len(detected_positions)} "
+                 f"detected traces matched to reference "
+                 f"({np.sum(is_sky)} sky fibers, "
                  f"{np.sum(is_dead)} dead fibers)")
 
         return fiber_ids, is_sky, is_dead
 
-    def get_fiber_metadata(self, det, slit_spat_ids):
+    def get_fiber_metadata(self, det, slit_spat_ids, slit_centers=None):
         """
         Map detected fiber traces to Binospec IFU fiber identifiers.
 
@@ -2025,12 +2164,19 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         reference fiber profile to assign physical fiber IDs and names.
 
         See base class for parameter and return value documentation.
+
+        Parameters
+        ----------
+        slit_centers : `numpy.ndarray`_, optional
+            Float-valued slit center positions at the spectral midpoint.
+            If provided, these are used instead of the integer
+            ``slit_spat_ids`` for more accurate fiber matching.
         """
         ref = self.load_fiber_ref_profile(det)
 
-        # Get detected fiber center positions (spat_id is the spatial
-        # pixel position at the spectral midpoint)
-        detected_positions = slit_spat_ids.astype(float)
+        # Use float centers when available for sub-pixel accuracy
+        detected_positions = slit_centers if slit_centers is not None \
+            else slit_spat_ids.astype(float)
 
         fiber_ids, is_sky, _ = self.match_fibers_to_reference(det, detected_positions)
 
