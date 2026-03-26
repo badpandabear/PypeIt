@@ -1772,6 +1772,80 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             'bulk_scale': bulk_scale,
         }
 
+    def apply_throughput_corrections(self, sobjs, det):
+        """
+        Apply per-fiber throughput corrections to extracted 1D spectra.
+
+        Divides each fiber's extracted counts (BOX_COUNTS, OPT_COUNTS) and
+        sky counts by its throughput correction from fiber_illumination.fits.
+        Updates inverse variance accordingly.
+
+        Args:
+            sobjs (:class:`~pypeit.specobjs.SpecObjs`):
+                Extracted SpecObjs. Modified in place.
+            det (:obj:`int`):
+                1-indexed detector number.
+        """
+        from pypeit import msgs
+        f_illum = self.load_fiber_illumination(det)
+        ref = self.load_fiber_ref_profile(det)
+        ref_ids = ref['FIB_ID']
+
+        n_corrected = 0
+        for sobj in sobjs:
+            fid = sobj.MASKDEF_ID
+            if fid is None or fid < 0:
+                continue
+            idx = np.where(ref_ids == fid)[0]
+            if len(idx) == 0 or idx[0] >= len(f_illum):
+                continue
+            corr = float(f_illum[idx[0]])
+            if corr < 0.1 or not np.isfinite(corr):
+                continue
+
+            # Correct boxcar
+            if sobj.BOX_COUNTS is not None:
+                sobj.BOX_COUNTS /= corr
+                if sobj.BOX_COUNTS_SKY is not None:
+                    sobj.BOX_COUNTS_SKY /= corr
+                if sobj.BOX_COUNTS_IVAR is not None:
+                    sobj.BOX_COUNTS_IVAR *= corr ** 2
+
+            # Correct optimal
+            if sobj.OPT_COUNTS is not None:
+                sobj.OPT_COUNTS /= corr
+                if sobj.OPT_COUNTS_SKY is not None:
+                    sobj.OPT_COUNTS_SKY /= corr
+                if sobj.OPT_COUNTS_IVAR is not None:
+                    sobj.OPT_COUNTS_IVAR *= corr ** 2
+
+            n_corrected += 1
+
+        msgs.info(f"Applied fiber illumination corrections to {n_corrected} fibers")
+
+    def compute_skyline_illum_1d(self, sobjs, det):
+        """
+        Compute per-fiber throughput correction from sky emission lines
+        in extracted 1D spectra.
+
+        Measures sky emission line flux in each fiber's extracted spectrum,
+        normalizes by the median across fibers, and returns per-fiber
+        correction factors.
+
+        Args:
+            sobjs (:class:`~pypeit.specobjs.SpecObjs`):
+                Extracted SpecObjs with BOX_WAVE and BOX_COUNTS populated.
+            det (:obj:`int`):
+                1-indexed detector number.
+
+        Returns:
+            :obj:`dict`: Maps MASKDEF_ID -> correction factor (float).
+        """
+        # TODO: Adapt the algorithm from compute_skyline_illum() to work
+        # on extracted 1D spectra instead of 2D image pixels.
+        # For now, return empty dict (no sky-line correction applied).
+        return {}
+
     def compute_skyline_illum(self, sciimg, waveimg, slitmask, spat_ids):
         """
         Compute per-fiber throughput correction from sky emission lines.

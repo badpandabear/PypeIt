@@ -1065,6 +1065,10 @@ class FiberExtract(Extract):
                 self._optimal_extract_fiber(
                     sobj, slitid_img, inmask, global_sky, None)
 
+        # Apply post-extraction throughput corrections
+        if hasattr(self.spectrograph, 'apply_throughput_corrections'):
+            self.spectrograph.apply_throughput_corrections(self.sobjs, self.det)
+
         # Set the bit for pixels masked by extraction
         base_gpm = self.sciImg.select_flag(invert=True)
         self.outmask.turn_on('EXTRACT',
