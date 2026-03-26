@@ -1858,7 +1858,6 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             det (:obj:`int`):
                 1-indexed detector number.
         """
-        from pypeit import msgs
         f_illum = self.load_fiber_illumination(det)
         ref = self.load_fiber_ref_profile(det)
         ref_ids = ref['FIB_ID']
@@ -1893,7 +1892,7 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
             n_corrected += 1
 
-        msgs.info(f"Applied fiber illumination corrections to {n_corrected} fibers")
+        log.info(f"Applied fiber illumination corrections to {n_corrected} fibers")
 
     def compute_skyline_illum_1d(self, sobjs, det):
         """
