@@ -1687,57 +1687,90 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
     def modify_pixelflat(self, flatimages, slits, det):
         """
-        Bake fiber-to-fiber illumination correction into the pixel flat.
+        Override to skip baking fiber illumination into the pixel flat.
 
-        Scales each fiber's region in ``pixelflat_norm`` by its relative
-        throughput factor from ``fiber_illumination.fits``.  When PypeIt
-        divides the science image by this modified flat, the fiber
-        throughput variation is corrected along with the pixel response.
+        In the block-slit extraction approach, throughput corrections
+        (fiber_illumination.fits and sky-line-based) are applied to
+        extracted 1D spectra, not to the pixel flat.
+        """
+        pass
+
+    def measure_fiber_flat_flux(self, flatimg, slits, det):
+        """
+        Measure integrated flat field flux for each fiber within block-slits.
+
+        Used to compute the bulk throughput ratio between sky fibers (bare)
+        and science fibers (lenslet-fed).
 
         Args:
-            flatimages (:class:`~pypeit.flatfield.FlatImages`):
-                Flat-field images to modify (in place).
+            flatimg (`numpy.ndarray`_):
+                Flat field image, shape ``(nspec, nspat)``.
             slits (:class:`~pypeit.slittrace.SlitTraceSet`):
-                Slit traces.
+                Block-slit traces (21 per detector).
             det (:obj:`int`):
                 1-indexed detector number.
+
+        Returns:
+            :obj:`dict`: Dictionary with keys:
+                - 'fiber_flux': per-fiber integrated flat flux (nfibers,)
+                - 'fiber_type': per-fiber type ('sky' or 'science')
+                - 'sky_avg': mean flux of sky fibers
+                - 'sci_avg': mean flux of science fibers
+                - 'bulk_scale': sci_avg / sky_avg (scalar)
         """
-        from pypeit import log
+        from pypeit.core.moment import moment1d
 
-        if flatimages.pixelflat_norm is None:
-            return
-
-        det_num = det if isinstance(det, int) else int(det)
-        f_illum_all = self.load_fiber_illumination(det_num)
-        ref = self.load_fiber_ref_profile(det_num)
-        ref_ids = ref['FIB_ID']
-
-        # Map each slit to its fiber ID via spatial position matching
-        spat_ids = slits.spat_id
-        fiber_meta = self.get_fiber_metadata(det_num, spat_ids)
-
-        # Build slit mask image (pixel -> spat_id)
+        blocks = self.get_fiber_blocks(det)
         slitmask = slits.slit_img(pad=0)
 
-        n_scaled = 0
-        for i, spat_id in enumerate(spat_ids):
-            fid = fiber_meta['fiber_id'][i]
-            if fid < 0:
-                continue
-            idx = np.where(ref_ids == fid)[0]
-            if len(idx) == 0 or idx[0] >= len(f_illum_all):
-                continue
-            f_illum = float(f_illum_all[idx[0]])
-            if f_illum < 0.1:
+        all_flux = []
+        all_type = []
+
+        for block_idx, block in enumerate(blocks):
+            if block_idx >= slits.nslits:
+                break
+            slit_spat_id = slits.spat_id[block_idx]
+            thismask = slitmask == slit_spat_id
+            if not np.any(thismask):
                 continue
 
-            # Scale this fiber's pixels in the flat
-            slit_pixels = slitmask == spat_id
-            flatimages.pixelflat_norm[slit_pixels] *= f_illum
-            n_scaled += 1
+            for j, fpos in enumerate(block['fiber_positions']):
+                # Boxcar integrate the flat flux around each fiber
+                trace = np.full(flatimg.shape[0], fpos)
+                # Half-spacing from neighbors
+                if block['nfibers'] > 1:
+                    positions = block['fiber_positions']
+                    spacings = np.diff(positions)
+                    if j == 0:
+                        half_sp = spacings[0] / 2.0
+                    elif j == len(positions) - 1:
+                        half_sp = spacings[-1] / 2.0
+                    else:
+                        half_sp = min(spacings[j-1], spacings[j]) / 2.0
+                else:
+                    half_sp = 3.3  # single fiber fallback
+                box_flux = moment1d(flatimg * thismask, trace, 2 * half_sp,
+                                    row=np.arange(flatimg.shape[0]))[0]
+                med_flux = np.median(box_flux[box_flux > 0]) if np.any(box_flux > 0) else 0.0
+                all_flux.append(med_flux)
+                all_type.append(block['type'])
 
-        log.info(f"DET{det_num:02d}: applied fiber illumination correction "
-                 f"to pixel flat ({n_scaled} fibers)")
+        all_flux = np.array(all_flux)
+        all_type = np.array(all_type)
+        sky_mask = all_type == 'sky'
+        sci_mask = all_type == 'science'
+
+        sky_avg = np.median(all_flux[sky_mask]) if np.any(sky_mask) else 1.0
+        sci_avg = np.median(all_flux[sci_mask]) if np.any(sci_mask) else 1.0
+        bulk_scale = sci_avg / sky_avg if sky_avg > 0 else 1.0
+
+        return {
+            'fiber_flux': all_flux,
+            'fiber_type': all_type,
+            'sky_avg': sky_avg,
+            'sci_avg': sci_avg,
+            'bulk_scale': bulk_scale,
+        }
 
     def compute_skyline_illum(self, sciimg, waveimg, slitmask, spat_ids):
         """
