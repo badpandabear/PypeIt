@@ -96,6 +96,18 @@ object — no peak-detection object finding is needed.
   (= indices + 1) to match against `FIB_ID` from the reference profile.
 - Header metadata cards: temperature is `TEMP`, humidity is `HUMID`,
   parallactic angle is `PA` (in `headarr[1]`).
+- **Block-slit architecture**: Fibers are grouped into 21 block-slits per
+  detector (42 total), each containing 8–20 fibers. Individual fibers are
+  objects within their block-slit, not separate slits. Edge detection uses
+  a high Sobel threshold (100σ) to find block boundaries at ~70 px
+  inter-block gaps.
+- Spatial illumination correction is not applied (no `IllumFlat`); fiber
+  throughput variations are corrected post-extraction using per-fiber
+  throughput weights derived from the flat field.
+- Wavelength calibration runs per block-slit (42 total vs 720 individual
+  fibers previously), providing significant performance improvement.
+- Throughput corrections are applied post-extraction: sky fibers are
+  extracted and throughput-corrected before building the 2D sky model.
 
 ## Testing
 

@@ -244,10 +244,10 @@ IFU Fiber Tracing
      - PypeIt
      - IDL Pipeline
    * - Trace model
-     - Edge pairs (left/right per fiber)
+     - Block-level edge detection (21 blocks per side, each containing 8-20 fibers)
      - Gaussian-Hermite profile per fiber (h3-h6)
    * - Detection method
-     - Sobel filter + threshold on flat field
+     - Sobel filter at high threshold (100σ) detects block boundaries at ~70px inter-block gaps
      - Peak detection + iterative profile fitting
    * - Profile model
      - Empirical from flat field for extraction
@@ -355,7 +355,7 @@ IFU
      - PypeIt
      - IDL Pipeline
    * - Strategy
-     - Joint B-spline fit across all sky fibers
+     - Sky fibers extracted first, throughput-corrected, then B-spline sky model projected to 2D
      - Dedicated sky fibers with ``resistant_mean`` or B-spline
    * - Sky fibers
      - 40 per side, identified by fiber name (``SKY*``)
@@ -377,6 +377,16 @@ and the same grating-dependent B-spline knot spacing.
 In PypeIt, the IFU sky subtraction is handled by
 :class:`~pypeit.find_objects.FiberFindObjects`, which inherits the joint
 sky fitting from :class:`~pypeit.find_objects.SlicerIFUFindObjects`.
+The sky subtraction flow is:
+
+1. Sky fibers (identified by ``FIB_NAME`` prefix ``SKY*``) are extracted
+   first from the sky-subtracted 2D image
+2. Extracted sky spectra are throughput-corrected using per-fiber
+   throughput weights derived from the flat field
+3. A B-spline sky model is fit to the throughput-corrected sky fiber
+   spectra and projected back onto the 2D detector frame
+4. The 2D sky model is subtracted before science fiber extraction
+
 Per-fiber sky fitting initially rejects narrow fibers (~5-6 pixels wide)
 as "bad sky fit"; the ``reduce_bpm`` is then reset before object
 creation so that all fibers remain available for extraction after the
@@ -406,13 +416,13 @@ IFU
      - PypeIt
      - IDL Pipeline
    * - Method
-     - Boxcar + optimal extraction (Horne 1986)
+     - Multi-fiber extraction within block-slits; boxcar + optimal (Horne 1986) with flat-derived profiles
      - Bounded least-squares (positivity constraint)
    * - Sky subtraction
      - Global sky model used directly (no local sky)
      - Sky subtracted during linearization
    * - Cross-talk
-     - Not modeled
+     - Handled by simultaneous multi-object profile fitting within blocks
      - Simultaneous multi-fiber solve per block
    * - Profile
      - Empirical from flat field (median-collapsed); Gaussian fallback
@@ -457,6 +467,12 @@ Wavelength Calibration
    * - Arc lamps
      - HeI, NeI, ArI, ArII
      - Same (HeNe + Ar)
+
+For IFU mode, PypeIt now runs wavelength calibration per block-slit (42
+total: 21 blocks per detector × 2 detectors) rather than per individual
+fiber (720 previously).  Each block-slit contains 8–20 fibers that share
+a common wavelength solution, providing a significant runtime improvement
+while retaining the accuracy of the 2D spatial fit within each block.
 
 
 Cube Building (IFU)
