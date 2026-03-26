@@ -1636,6 +1636,55 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             })
         return blocks
 
+    def identify_fibers_in_block(self, det, block_idx, detected_positions):
+        """
+        Identify fibers within a block-slit by matching detected peak positions
+        to reference fiber positions.
+
+        Args:
+            det (:obj:`int`): 1-indexed detector number.
+            block_idx (:obj:`int`): 0-based block index.
+            detected_positions (`numpy.ndarray`_): Detected fiber peak pixel
+                positions within the block-slit, sorted by position.
+
+        Returns:
+            :obj:`dict`: Keys 'fiber_id', 'fiber_name', 'fiber_type' — arrays
+                aligned with detected_positions. Unmatched fibers get
+                fiber_id=-1, fiber_name='UNKNOWN', fiber_type='unknown'.
+        """
+        blocks = self.get_fiber_blocks(det)
+        block = blocks[block_idx]
+        ref_positions = block['fiber_positions']
+        ref_ids = block['fiber_ids']
+        ref_names = block['fiber_names']
+
+        n_det = len(detected_positions)
+        n_ref = len(ref_positions)
+
+        fiber_id = np.full(n_det, -1, dtype=int)
+        fiber_name = np.array(['UNKNOWN'] * n_det, dtype='U20')
+        fiber_type = np.array(['unknown'] * n_det, dtype='U10')
+
+        # Compute offset: median shift between detected and reference
+        if n_det == n_ref:
+            offset = np.median(detected_positions - ref_positions)
+        else:
+            offset = 0.0
+
+        shifted_ref = ref_positions + offset
+
+        # Match by nearest neighbor with threshold
+        threshold = 3.5  # pixels
+        for i, dpos in enumerate(detected_positions):
+            dists = np.abs(shifted_ref - dpos)
+            best = np.argmin(dists)
+            if dists[best] < threshold:
+                fiber_id[i] = int(ref_ids[best])
+                fiber_name[i] = ref_names[best]
+                fiber_type[i] = 'sky' if ref_names[best].startswith('SKY') else 'science'
+
+        return {'fiber_id': fiber_id, 'fiber_name': fiber_name, 'fiber_type': fiber_type}
+
     def modify_pixelflat(self, flatimages, slits, det):
         """
         Bake fiber-to-fiber illumination correction into the pixel flat.

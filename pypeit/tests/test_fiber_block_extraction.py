@@ -56,3 +56,34 @@ class TestFiberBlockConfig:
         for i in range(len(blocks) - 1):
             gap = blocks[i+1]['min_pix'] - blocks[i]['max_pix']
             assert gap > 50, f"Gap between blocks {i} and {i+1} is only {gap:.1f} px"
+
+
+class TestFiberMatchingInBlocks:
+    """Tests for identifying fibers within block-slits."""
+
+    @classmethod
+    def setup_class(cls):
+        cls.spec = MMTBINOSPECIFUSpectrograph()
+
+    def test_identify_fibers_in_block(self):
+        """Given fiber peak positions within a block, identify each fiber."""
+        blocks = self.spec.get_fiber_blocks(1)
+        # Use the reference positions as "detected" positions for block 2 (science, 20 fibers)
+        block = blocks[1]  # block 2 (0-indexed = 1)
+        detected_positions = block['fiber_positions']
+        result = self.spec.identify_fibers_in_block(
+            det=1, block_idx=1, detected_positions=detected_positions)
+        assert len(result['fiber_id']) == 20
+        assert len(result['fiber_name']) == 20
+        # All should match since we used reference positions
+        assert np.all(result['fiber_id'] > 0)
+
+    def test_identify_fibers_with_offset(self):
+        """Fibers should still match with a small position offset."""
+        blocks = self.spec.get_fiber_blocks(1)
+        block = blocks[1]
+        # Add 2-pixel offset (simulating flexure)
+        detected_positions = block['fiber_positions'] + 2.0
+        result = self.spec.identify_fibers_in_block(
+            det=1, block_idx=1, detected_positions=detected_positions)
+        assert np.all(result['fiber_id'] > 0)
