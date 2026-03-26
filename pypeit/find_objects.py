@@ -1483,9 +1483,9 @@ class FiberFindObjects(SlicerIFUFindObjects):
                     OBJTYPE=self.objtype,
                     SLITID=slit_spat_id,
                 )
-                thisobj.TRACE_SPAT = np.full(nspec, center_pix)
+                thisobj.TRACE_SPAT = np.full(nspec, float(center_pix))
                 thisobj.trace_spec = np.arange(nspec)
-                thisobj.SPAT_PIXPOS = center_pix
+                thisobj.SPAT_PIXPOS = float(center_pix)
                 thisobj.BOX_R_PIX = half_spacings[j]
 
                 # Assign fiber metadata
@@ -1720,9 +1720,9 @@ class FiberFindObjects(SlicerIFUFindObjects):
                     OBJTYPE=self.objtype,
                     SLITID=slit_spat_id,
                 )
-                thisobj.TRACE_SPAT = trace_center
+                thisobj.TRACE_SPAT = trace_center.astype(float)
                 thisobj.trace_spec = np.arange(nspec)
-                thisobj.SPAT_PIXPOS = center_pix
+                thisobj.SPAT_PIXPOS = float(center_pix)
                 thisobj.SPAT_PIXPOS_ID = int(np.rint(center_pix))
                 thisobj.SPAT_FRACPOS = (center_pix - np.median(left)) / \
                     np.median(right - left)
