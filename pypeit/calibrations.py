@@ -1787,6 +1787,126 @@ class IFUCalibrations(Calibrations):
         return ['bias', 'dark', 'bpm', 'arc', 'tiltimg', 'slits', 'wv_calib', 'tilts', 'align',
                 'scattlight', 'flats']
 
+    def get_slits(self, force:str=None):
+        """
+        Load or generate the definition of the slit boundaries.
+
+        For Fiber pypeline spectrographs that provide a
+        ``get_block_slit_edges`` method, this bypasses the standard Sobel
+        edge detection and instead defines block-slit edges directly from
+        the reference fiber profile with bulk shift correction. This is
+        necessary when scattered light in inter-block gaps prevents
+        reliable edge detection.
+
+        For all other IFU spectrographs, falls back to the parent
+        :meth:`Calibrations.get_slits`.
+
+        Returns:
+            :class:`~pypeit.slittrace.SlitTraceSet`: Traces of the
+            slit edges; also kept internally as :attr:`slits`.
+        """
+        # If the spectrograph doesn't provide block slit edges, use
+        # the standard edge tracing flow.
+        if not hasattr(self.spectrograph, 'get_block_slit_edges'):
+            return super().get_slits(force=force)
+
+        # Check for existing data
+        if not self._chk_objs(['msbpm']):
+            return None
+
+        # Check internals
+        self._chk_set(['det', 'calib_ID', 'par'])
+
+        # Prep
+        frame = {'type': 'trace', 'class': slittrace.SlitTraceSet}
+        raw_trace_files, cal_file, calib_key, setup, calib_id, detname \
+                = self.find_calibrations(frame['type'], frame['class'])
+
+        if len(raw_trace_files) == 0 and cal_file is None:
+            log.warning(f'No raw {frame["type"]} frames found and unable to identify a relevant '
+                      'processed calibration frame.  Continuing...')
+            self.slits = None
+            return self.slits
+
+        # If a processed calibration frame exists and we want to reuse it, do
+        # so:
+        self.slits = self.process_load_selection(frame, cal_file, force)
+        if not self.success:
+            return None
+        elif self.slits is not None:
+            self.slits.mask = self.slits.mask_init.copy()
+            if self.user_slits is not None:
+                self.slits.user_mask(detname, self.user_slits)
+            return self.slits
+
+        # Need to build from scratch.  Build the trace image.
+        log.info('Creating block-slit edges from reference fiber profile '
+                 'using trace files: ')
+        for f in raw_trace_files:
+            log.info(f'        {Path(f).name}')
+        self.raw_files = raw_trace_files
+
+        # Reset the BPM
+        self.get_bpm(frame=raw_trace_files[0])
+
+        # Perform a check on the files
+        self.check_calibrations(raw_trace_files)
+
+        traceImage = buildimage.buildimage_fromlist(self.spectrograph, self.det,
+                                                    self.par['traceframe'], raw_trace_files,
+                                                    bias=self.msbias, bpm=self.msbpm,
+                                                    dark=self.msdark, calib_dir=self.calib_dir,
+                                                    setup=setup, calib_id=calib_id)
+
+        # Handle lamp-off flats if present
+        raw_lampoff_files = self.fitstbl.find_frame_files('lampoffflats',
+                                                           calib_ID=self.calib_ID)
+        if len(raw_lampoff_files) > 0:
+            log.info('Subtracting lamp off flats using files: ')
+            for f in raw_lampoff_files:
+                log.info(f'        {Path(f).name}')
+            self.get_bpm(frame=raw_trace_files[0])
+            self.check_calibrations(raw_lampoff_files)
+            lampoff_flat = buildimage.buildimage_fromlist(self.spectrograph, self.det,
+                                                          self.par['lampoffflatsframe'],
+                                                          raw_lampoff_files, dark=self.msdark,
+                                                          bias=self.msbias, bpm=self.msbpm)
+            traceImage = traceImage.sub(lampoff_flat)
+
+        # Get block-slit edges from the reference fiber profile
+        left_edges, right_edges = self.spectrograph.get_block_slit_edges(
+            traceImage.image, self.det)
+
+        nspec, nspat = traceImage.image.shape
+        binspec, binspat = parse.parse_binning(traceImage.detector.binning)
+
+        # Construct SlitTraceSet directly from the block edges
+        self.slits = slittrace.SlitTraceSet(
+            left_init=left_edges,
+            right_init=right_edges,
+            pypeline=self.spectrograph.pypeline,
+            detname=detname,
+            nspec=nspec,
+            nspat=nspat,
+            PYP_SPEC=self.spectrograph.name,
+            binspec=binspec,
+            binspat=binspat,
+            pad=self.par['slitedges']['pad'],
+        )
+
+        # Set calibration paths and save
+        self.slits.set_paths(self.calib_dir, setup, calib_id, detname)
+        self.slits.to_file()
+
+        # State
+        self.slits_state(self.slits.get_path())
+
+        if self.user_slits is not None:
+            self.slits.user_mask(detname, self.user_slits)
+
+        traceImage = None
+        return self.slits
+
 
 def check_for_calibs(par, fitstbl, raise_error=True, cut_cfg=None):
     """

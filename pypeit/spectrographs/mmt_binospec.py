@@ -1333,23 +1333,11 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         # Avoid trimming edges of narrow IFU fibers (~5-6 pixels wide)
         par['reduce']['trim_edge'] = [0, 0]
 
-        # Slit edge parameters tuned for block-level detection.
-        # Binospec IFU fibers are organized in 21 blocks (5 sky + 16 science)
-        # separated by ~66-74 pixel gaps. Within blocks, fibers are ~6.6 pixels
-        # apart with no true gaps (only cross-talk and scattered light between them).
-        # The edge_thresh is set high enough to detect only block boundaries,
-        # not individual fiber edges within blocks.
-        par['calibrations']['slitedges']['edge_thresh'] = 100.
-        par['calibrations']['slitedges']['minimum_slit_gap'] = 0.
-        par['calibrations']['slitedges']['minimum_slit_length'] = 5.0  # blocks span ~126px
+        # Slit edge parameters: Sobel edge detection is bypassed for this
+        # spectrograph via get_block_slit_edges(), which defines block-slit
+        # edges directly from the reference fiber profile. Only pad is used
+        # (passed through to SlitTraceSet).
         par['calibrations']['slitedges']['pad'] = 0
-        par['calibrations']['slitedges']['use_maskdesign'] = False
-        par['calibrations']['slitedges']['fwhm_gaussian'] = 3.0  # default
-        # min_edge_side_sep is a multiplier on fwhm_gaussian (actual threshold =
-        # min_edge_side_sep * fwhm_gaussian pixels). Set to 10 -> 30px minimum,
-        # large enough to bridge a dead fiber (~6.6px) within a block but well
-        # below inter-block gaps (~66-74px).
-        par['calibrations']['slitedges']['min_edge_side_sep'] = 10.0
 
         # Scattered light correction for science frames only.
         # Flats don't need it (used for geometry/pixel response, not flux).
@@ -1589,6 +1577,90 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         with fits.open(illum_file) as hdu:
             f_illum = hdu[1].data['F_ILLUM'][row].copy()
         return f_illum
+
+    def get_block_slit_edges(self, traceimg, det):
+        """
+        Define block-slit edges from the reference fiber profile.
+
+        Instead of using Sobel edge detection (which fails due to scattered
+        light in inter-block gaps), this method defines slit edges at the
+        midpoints between adjacent fiber blocks. A bulk pixel shift is
+        determined by cross-correlating the trace image against the expected
+        fiber pattern.
+
+        Args:
+            traceimg (`numpy.ndarray`_):
+                Trace image (raw flat), shape ``(nspec, nspat)``.
+            det (:obj:`int`):
+                1-indexed detector number.
+
+        Returns:
+            :obj:`tuple`: ``(left_edges, right_edges)`` arrays of shape
+                ``(nspec, nblocks)`` with constant slit edge positions.
+        """
+        from scipy.signal import correlate
+
+        blocks = self.get_fiber_blocks(det)
+        nspec, nspat = traceimg.shape
+
+        # Build expected spatial profile from reference fiber positions
+        # (sum of Gaussians at each fiber position)
+        all_positions = np.concatenate([b['fiber_positions'] for b in blocks])
+        ref_profile = np.zeros(nspat)
+        sigma = 2.5  # typical fiber sigma in pixels
+        x = np.arange(nspat)
+        for pos in all_positions:
+            ref_profile += np.exp(-0.5 * ((x - pos) / sigma) ** 2)
+
+        # Collapse trace image to spatial profile (median of central half)
+        obs_profile = np.median(traceimg[nspec // 4:3 * nspec // 4, :], axis=0)
+
+        # Cross-correlate to find bulk shift (search within +/-20 pixels)
+        max_shift = 20
+        cc = correlate(obs_profile, ref_profile, mode='full')
+        # The peak of cc is at index (len(obs) - 1 + shift)
+        mid = len(obs_profile) - 1
+        search_range = cc[mid - max_shift:mid + max_shift + 1]
+        best_offset = np.argmax(search_range) - max_shift
+
+        log.info(f"DET{det:02d}: bulk fiber shift = {best_offset} pixels "
+                 f"(cross-correlation)")
+
+        # Compute block slit edges at midpoints between blocks
+        nblocks = len(blocks)
+        left_edges = np.zeros((nspec, nblocks))
+        right_edges = np.zeros((nspec, nblocks))
+
+        for i, block in enumerate(blocks):
+            shifted_positions = block['fiber_positions'] + best_offset
+            block_min = shifted_positions.min()
+            block_max = shifted_positions.max()
+
+            # Typical fiber spacing within block
+            if len(shifted_positions) > 1:
+                fiber_spacing = np.median(np.diff(shifted_positions))
+            else:
+                fiber_spacing = 6.6  # fallback
+
+            # Left edge: midpoint to previous block, or extend by fiber_spacing
+            if i > 0:
+                prev_max = blocks[i - 1]['fiber_positions'].max() + best_offset
+                left_edges[:, i] = (prev_max + block_min) / 2.0
+            else:
+                left_edges[:, i] = block_min - fiber_spacing
+
+            # Right edge: midpoint to next block, or extend by fiber_spacing
+            if i < nblocks - 1:
+                next_min = blocks[i + 1]['fiber_positions'].min() + best_offset
+                right_edges[:, i] = (block_max + next_min) / 2.0
+            else:
+                right_edges[:, i] = block_max + fiber_spacing
+
+            # Clip to detector bounds
+            left_edges[:, i] = np.clip(left_edges[:, i], 0, nspat - 1)
+            right_edges[:, i] = np.clip(right_edges[:, i], 0, nspat - 1)
+
+        return left_edges, right_edges
 
     def get_fiber_blocks(self, det):
         """
