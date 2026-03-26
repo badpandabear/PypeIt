@@ -1590,6 +1590,52 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             f_illum = hdu[1].data['F_ILLUM'][row].copy()
         return f_illum
 
+    def get_fiber_blocks(self, det):
+        """
+        Return the fiber block structure from the reference profile.
+
+        Each block is a group of fibers that will become a single "slit"
+        in the block-slit extraction approach. Blocks are defined by the
+        FIB_BLOCK column in the reference profile.
+
+        Args:
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+
+        Returns:
+            :obj:`list` of :obj:`dict`: One dict per block with keys:
+                - 'block_id': int, block number from reference profile
+                - 'nfibers': int, number of fibers in block
+                - 'type': str, 'sky' or 'science'
+                - 'fiber_positions': ndarray, reference pixel positions (TR_PIX)
+                - 'fiber_names': list of str, fiber names
+                - 'fiber_ids': ndarray, fiber IDs
+                - 'min_pix': float, minimum pixel position in block
+                - 'max_pix': float, maximum pixel position in block
+        """
+        ref = self.load_fiber_ref_profile(det)
+        # Exclude dead fibers assigned to block -1 (no valid trace position)
+        live = ref['FIB_BLOCK'] >= 0
+        ref = ref[live]
+        block_ids = np.unique(ref['FIB_BLOCK'])
+        blocks = []
+        for bid in block_ids:
+            mask = ref['FIB_BLOCK'] == bid
+            names = [n.strip() for n in ref['FIB_NAME'][mask]]
+            n_sky = sum(1 for n in names if n.startswith('SKY'))
+            positions = ref['TR_PIX'][mask]
+            blocks.append({
+                'block_id': int(bid),
+                'nfibers': int(np.sum(mask)),
+                'type': 'sky' if n_sky > 0 else 'science',
+                'fiber_positions': positions,
+                'fiber_names': names,
+                'fiber_ids': ref['FIB_ID'][mask],
+                'min_pix': float(positions.min()),
+                'max_pix': float(positions.max()),
+            })
+        return blocks
+
     def modify_pixelflat(self, flatimages, slits, det):
         """
         Bake fiber-to-fiber illumination correction into the pixel flat.
