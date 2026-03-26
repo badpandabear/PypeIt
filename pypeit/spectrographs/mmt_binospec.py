@@ -1333,20 +1333,23 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         # Avoid trimming edges of narrow IFU fibers (~5-6 pixels wide)
         par['reduce']['trim_edge'] = [0, 0]
 
-        # Slit edge parameters tuned for densely-packed IFU fibers.
-        # Fibers are ~7 pixels peak-to-peak with ~5-6 pixel widths and
-        # inter-fiber gaps of only ~2 pixels.
-        par['calibrations']['slitedges']['edge_thresh'] = 5.
+        # Slit edge parameters tuned for block-level detection.
+        # Binospec IFU fibers are organized in 21 blocks (5 sky + 16 science)
+        # separated by ~66-74 pixel gaps. Within blocks, fibers are ~6.6 pixels
+        # apart with no true gaps (only cross-talk and scattered light between them).
+        # The edge_thresh is set high enough to detect only block boundaries,
+        # not individual fiber edges within blocks.
+        par['calibrations']['slitedges']['edge_thresh'] = 100.
         par['calibrations']['slitedges']['minimum_slit_gap'] = 0.
-        # Fiber widths are ~5-6 pixels = ~1.2-1.4 arcsec at 0.24"/pix
-        par['calibrations']['slitedges']['minimum_slit_length'] = 0.5
+        par['calibrations']['slitedges']['minimum_slit_length'] = 5.0  # blocks span ~126px
         par['calibrations']['slitedges']['pad'] = 0
         par['calibrations']['slitedges']['use_maskdesign'] = False
-        # Default min_edge_side_sep=5 * fwhm_gaussian=3 = 15 pixels,
-        # which merges adjacent fibers. Reduce so edges can be as close
-        # as ~3 pixels apart (1 * 3 = 3 pixels).
-        par['calibrations']['slitedges']['fwhm_gaussian'] = 2.0
-        par['calibrations']['slitedges']['min_edge_side_sep'] = 1.0
+        par['calibrations']['slitedges']['fwhm_gaussian'] = 3.0  # default
+        # min_edge_side_sep is a multiplier on fwhm_gaussian (actual threshold =
+        # min_edge_side_sep * fwhm_gaussian pixels). Set to 10 -> 30px minimum,
+        # large enough to bridge a dead fiber (~6.6px) within a block but well
+        # below inter-block gaps (~66-74px).
+        par['calibrations']['slitedges']['min_edge_side_sep'] = 10.0
 
         # Scattered light correction for science frames only.
         # Flats don't need it (used for geometry/pixel response, not flux).
@@ -1360,9 +1363,9 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         par['calibrations']['flatfield']['slit_trim'] = 0
         par['calibrations']['flatfield']['slit_illum_finecorr'] = False
 
-        # Tilts: reduce order for short fiber "slits"
-        par['calibrations']['tilts']['spat_order'] = 1
-        par['calibrations']['tilts']['spec_order'] = 1
+        # Tilts: increase spat_order for block-slits (~126px wide vs ~5px fiber slits)
+        par['calibrations']['tilts']['spat_order'] = 3
+        par['calibrations']['tilts']['spec_order'] = 3
 
         # Flexure: Binospec has active flexure control, so spectral
         # flexure correction is not needed for IFU mode
