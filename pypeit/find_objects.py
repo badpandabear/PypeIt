@@ -1333,7 +1333,8 @@ class FiberFindObjects(SlicerIFUFindObjects):
 
     For fiber spectrographs, each fiber IS the object — there is no need
     for peak-detection object finding. This class creates one SpecObj per
-    fiber with the trace set to the fiber center (from slit edges).
+    fiber within each block-slit, using reference fiber positions from
+    the spectrograph.
 
     The global sky subtraction is inherited from
     :class:`SlicerIFUFindObjects`, which handles joint sky fitting across
@@ -1351,8 +1352,8 @@ class FiberFindObjects(SlicerIFUFindObjects):
         For fiber spectrographs, object finding does not depend on the
         sky-subtracted image (each fiber IS the object), so we perform a
         single global sky subtraction pass and then create the fiber
-        objects.  This avoids the two-pass sky/object-finding loop of
-        the base class.
+        objects within each block-slit.  This avoids the two-pass
+        sky/object-finding loop of the base class.
 
         Parameters
         ----------
@@ -1396,11 +1397,12 @@ class FiberFindObjects(SlicerIFUFindObjects):
                               show_peaks=False, show_fits=False, show_trace=False,
                               show=False, save_objfindQA=False, neg=False, debug=False):
         """
-        Create one SpecObj per fiber from known slit edges.
+        Create one SpecObj per fiber within each block-slit.
 
-        Instead of running peak-detection object finding, this method
-        creates a single object per fiber with the trace set to the
-        center of each slit (fiber).
+        For each block-slit, uses fiber positions from the spectrograph's
+        reference profile to create SpecObjs at known fiber locations.
+        FWHM and BOX_R_PIX are set from inter-fiber spacing so adjacent
+        boxcar apertures touch but don't overlap.
 
         Parameters
         ----------
@@ -1437,55 +1439,69 @@ class FiberFindObjects(SlicerIFUFindObjects):
         gdslits = np.where(np.logical_not(self.reduce_bpm))[0]
         sobjs = specobjs.SpecObjs()
         nspec = image.shape[0]
+        obj_counter = 0
 
-        boxcar_rad = self.par['reduce']['extraction']['boxcar_radius'] \
-            / self.get_platescale()
-
-        # Query instrument for fiber metadata (IDs, names, types).
-        # Pass float slit centers for sub-pixel matching accuracy.
-        nspec_slit = self.slits_left.shape[0]
-        slit_mid = nspec_slit // 2
-        slit_centers = (self.slits_left[slit_mid, :] +
-                        self.slits_right[slit_mid, :]) / 2.0
-        fiber_meta = self.spectrograph.get_fiber_metadata(
-            self.det, self.slits.spat_id, slit_centers=slit_centers)
+        # Get block structure from spectrograph
+        blocks = self.spectrograph.get_fiber_blocks(self.det)
 
         for slit_idx in gdslits:
             slit_spat_id = self.slits.spat_id[slit_idx]
-
-            # Fiber center trace from slit edges
             left = self.slits_left[:, slit_idx]
             right = self.slits_right[:, slit_idx]
-            trace_center = (left + right) / 2.0
-            fiber_half_width = np.median((right - left) / 2.0)
 
-            # Create SpecObj for this fiber
-            thisobj = specobj.SpecObj(
-                PYPELINE='Fiber',
-                DET=self.sciImg.detector.name,
-                OBJTYPE=self.objtype,
-                SLITID=slit_spat_id,
-            )
-            thisobj.TRACE_SPAT = trace_center
-            thisobj.trace_spec = np.arange(nspec)
-            thisobj.SPAT_PIXPOS = np.median(trace_center)
-            thisobj.SPAT_PIXPOS_ID = int(np.rint(thisobj.SPAT_PIXPOS))
-            thisobj.SPAT_FRACPOS = 0.5  # centered in fiber
-            thisobj.FWHM = 2.0 * fiber_half_width
-            thisobj.maskwidth = 1.0  # use full fiber width
-            thisobj.BOX_R_PIX = min(fiber_half_width, boxcar_rad)
-            thisobj.smash_peakflux = 1.0
-            thisobj.smash_snr = 100.0
-            thisobj.OBJID = slit_idx + 1
+            # Get reference fiber positions for this block
+            if slit_idx >= len(blocks):
+                continue
+            block = blocks[slit_idx]
+            fiber_centers = block['fiber_positions'].copy()
 
-            # Assign instrument fiber metadata if available
-            if fiber_meta is not None:
-                thisobj.MASKDEF_ID = int(fiber_meta['fiber_id'][slit_idx])
-                thisobj.MASKDEF_OBJNAME = fiber_meta['fiber_name'][slit_idx]
+            if len(fiber_centers) == 0:
+                continue
 
-            thisobj.set_name()
+            # Identify fibers using spectrograph reference
+            fiber_meta = self.spectrograph.identify_fibers_in_block(
+                self.det, slit_idx, fiber_centers)
 
-            sobjs.add_sobj(thisobj)
+            # Compute inter-fiber spacings for BOX_R_PIX
+            spacings = np.diff(fiber_centers)
+            half_spacings = np.zeros(len(fiber_centers))
+            if len(spacings) > 0:
+                half_spacings[0] = spacings[0] / 2.0
+                half_spacings[-1] = spacings[-1] / 2.0
+                half_spacings[1:-1] = np.minimum(spacings[:-1], spacings[1:]) / 2.0
+            else:
+                half_spacings[0] = np.median(right - left) / 2.0
+
+            for j, center_pix in enumerate(fiber_centers):
+                obj_counter += 1
+                trace_center = np.full(nspec, center_pix)
+
+                thisobj = specobj.SpecObj(
+                    PYPELINE='Fiber',
+                    DET=self.sciImg.detector.name,
+                    OBJTYPE=self.objtype,
+                    SLITID=slit_spat_id,
+                )
+                thisobj.TRACE_SPAT = trace_center
+                thisobj.trace_spec = np.arange(nspec)
+                thisobj.SPAT_PIXPOS = center_pix
+                thisobj.SPAT_PIXPOS_ID = int(np.rint(center_pix))
+                thisobj.SPAT_FRACPOS = (center_pix - np.median(left)) / \
+                    np.median(right - left)
+                thisobj.FWHM = 2.0 * half_spacings[j]
+                thisobj.maskwidth = half_spacings[j] / np.median((right - left) / 2.0)
+                thisobj.BOX_R_PIX = half_spacings[j]
+                thisobj.smash_peakflux = 1.0
+                thisobj.smash_snr = 100.0
+                thisobj.OBJID = obj_counter
+
+                # Assign fiber metadata
+                if fiber_meta is not None:
+                    thisobj.MASKDEF_ID = int(fiber_meta['fiber_id'][j])
+                    thisobj.MASKDEF_OBJNAME = fiber_meta['fiber_name'][j]
+
+                thisobj.set_name()
+                sobjs.add_sobj(thisobj)
 
         # Steps
         self.steps.append(inspect.stack()[0][3])
