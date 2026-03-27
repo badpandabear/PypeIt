@@ -1349,10 +1349,12 @@ class FiberFindObjects(SlicerIFUFindObjects):
         """
         Primary code flow for fiber object finding.
 
-        Extracts sky fibers from dedicated sky block-slits, applies
-        throughput corrections, builds a B-spline sky model from the
-        corrected sky spectra, and projects it into 2D for subtraction.
-        Then creates SpecObjs for all fibers on the sky-subtracted image.
+        For fiber spectrographs, object finding does not depend on the
+        sky-subtracted image (each fiber IS the object), so we perform a
+        single global sky subtraction pass using the inherited
+        ``joint_skysub()`` (pixel-level B-spline fit across dedicated sky
+        block-slits) and then create the fiber objects within each
+        block-slit.
 
         Parameters
         ----------
@@ -1361,284 +1363,36 @@ class FiberFindObjects(SlicerIFUFindObjects):
         show_peaks : :obj:`bool`, optional
             Ignored for fiber reductions.
         show_skysub_fit : :obj:`bool`, optional
-            Ignored for fiber reductions.
+            Show the fits for the global sky subtraction.
 
         Returns
         -------
         initial_sky : `numpy.ndarray`_
-            2D sky model image.
+            Global sky model.
         sobjs_obj : :class:`~pypeit.specobjs.SpecObjs`
             List of objects found (one per fiber).
         """
-        # Build the wavelength image needed for extraction and sky modeling
-        if self.waveimg is None:
-            if self.wv_calib is None:
-                raise PypeItError("Wavelength calibration (wv_calib) is required "
-                                  "for fiber sky subtraction.")
-            log.info("Generating wavelength image for fiber sky subtraction")
-            self.waveimg = self.wv_calib.build_waveimg(
-                self.tilts, self.slits, spat_flexure=self.spat_flexure_shift)
+        # Perform global sky subtraction (joint pixel-level B-spline fit
+        # across dedicated sky block-slits, inherited from SlicerIFUFindObjects)
+        initial_sky = self.global_skysub(skymask=self.initial_skymask,
+                                         update_crmask=False,
+                                         objs_not_masked=True,
+                                         show_fit=show_skysub_fit)
 
-        # Phase 1: Extract sky fibers from sky block-slits
-        sky_sobjs = self._extract_sky_fibers()
-
-        # Phase 2: Apply throughput corrections
-        throughput_corr = np.ones(len(sky_sobjs))
-        if len(sky_sobjs) > 0 and hasattr(self.spectrograph, 'load_fiber_illumination'):
-            try:
-                f_illum = self.spectrograph.load_fiber_illumination(self.det)
-                ref = self.spectrograph.load_fiber_ref_profile(self.det)
-                ref_ids = ref['FIB_ID']
-                for i, sobj in enumerate(sky_sobjs):
-                    fid = sobj.MASKDEF_ID
-                    if fid is not None and fid > 0:
-                        idx = np.where(ref_ids == fid)[0]
-                        if len(idx) > 0 and idx[0] < len(f_illum):
-                            illum_val = float(f_illum[idx[0]])
-                            if illum_val > 0:
-                                # Correction factor: divide out the fiber's
-                                # relative throughput so all sky fibers are
-                                # on a common scale
-                                throughput_corr[i] = 1.0 / illum_val
-                log.info("Applied fiber illumination corrections to %d sky fibers",
-                         np.sum(throughput_corr != 1.0))
-            except Exception:
-                log.warning("Could not load fiber illumination corrections; "
-                            "proceeding without throughput correction")
-
-        # Phase 3: Build B-spline sky model
-        sky_bspline = self._build_sky_model(sky_sobjs, throughput_corr)
-
-        # Phase 4: Project sky model to 2D
-        if sky_bspline is not None:
-            initial_sky = self._project_sky_to_2d(sky_bspline)
-        else:
-            log.warning("Sky model fitting failed -- no sky subtraction applied")
-            initial_sky = np.zeros_like(self.sciImg.image)
-
-        # Phase 5: Create SpecObjs for all fibers (sky + science)
+        # Reset reduce_bpm: the per-slit sky sub step (which runs inside
+        # global_skysub before the joint fit) may reject some block-slits.
+        # The joint fit across dedicated sky block-slits succeeds and
+        # produces a valid sky model, so we need all slits available for
+        # object creation.
         self.reduce_bpm = self.reduce_bpm_init.copy()
+
+        # Create SpecObjs for all fibers within block-slits
         sobjs_obj, self.nobj = self.find_objects(
             self.sciImg.image - initial_sky, self.sciImg.ivar,
             std_trace=std_trace, show=self.findobj_show,
             show_peaks=show_peaks)
 
         return initial_sky, sobjs_obj
-
-    def _extract_sky_fibers(self):
-        """
-        Extract sky fibers from dedicated sky block-slits via boxcar extraction.
-
-        Identifies sky blocks from the spectrograph's fiber block structure,
-        creates temporary SpecObjs for each sky fiber, and performs boxcar
-        extraction on the raw (un-sky-subtracted) science image.
-
-        Returns
-        -------
-        sky_sobjs : :class:`~pypeit.specobjs.SpecObjs`
-            Container of extracted sky fiber SpecObjs with BOX_WAVE,
-            BOX_COUNTS, etc. populated.
-        """
-        blocks = self.spectrograph.get_fiber_blocks(self.det)
-        sky_sobjs = specobjs.SpecObjs()
-        nspec = self.sciImg.image.shape[0]
-        gpm = self.sciImg.select_flag(invert=True)
-
-        for slit_idx, block in enumerate(blocks):
-            if block['type'] != 'sky':
-                continue
-            if slit_idx >= self.slits.nslits:
-                continue
-
-            slit_spat_id = self.slits.spat_id[slit_idx]
-            left = self.slits_left[:, slit_idx]
-            right = self.slits_right[:, slit_idx]
-
-            fiber_centers = block['fiber_positions'].copy()
-            if len(fiber_centers) == 0:
-                continue
-
-            # Identify fibers in this block
-            fiber_meta = self.spectrograph.identify_fibers_in_block(
-                self.det, slit_idx, fiber_centers)
-
-            # Compute inter-fiber spacings for BOX_R_PIX
-            spacings = np.diff(fiber_centers)
-            half_spacings = np.zeros(len(fiber_centers))
-            if len(spacings) > 0:
-                half_spacings[0] = spacings[0] / 2.0
-                half_spacings[-1] = spacings[-1] / 2.0
-                half_spacings[1:-1] = np.minimum(spacings[:-1], spacings[1:]) / 2.0
-            else:
-                half_spacings[0] = np.median(right - left) / 2.0
-
-            # Slit mask for this block-slit
-            thismask = self.slitmask == slit_spat_id
-            inmask = gpm & thismask
-
-            for j, center_pix in enumerate(fiber_centers):
-                thisobj = specobj.SpecObj(
-                    PYPELINE='Fiber',
-                    DET=self.sciImg.detector.name,
-                    OBJTYPE=self.objtype,
-                    SLITID=slit_spat_id,
-                )
-                thisobj.TRACE_SPAT = np.full(nspec, float(center_pix))
-                thisobj.trace_spec = np.arange(nspec)
-                thisobj.SPAT_PIXPOS = float(center_pix)
-                thisobj.BOX_R_PIX = half_spacings[j]
-
-                # Assign fiber metadata
-                if fiber_meta is not None:
-                    thisobj.MASKDEF_ID = int(fiber_meta['fiber_id'][j])
-                    thisobj.MASKDEF_OBJNAME = fiber_meta['fiber_name'][j]
-
-                # Boxcar extraction from the raw science image (no sky subtraction)
-                thisobj.extract_boxcar(
-                    self.sciImg.image,       # raw science image
-                    self.sciImg.ivar,
-                    inmask,
-                    self.waveimg,
-                    np.zeros_like(self.sciImg.image),  # skyimg=0
-                    base_var=self.sciImg.base_var,
-                    count_scale=self.sciImg.img_scale,
-                    noise_floor=self.sciImg.noise_floor)
-
-                sky_sobjs.add_sobj(thisobj)
-
-        log.info("Extracted %d sky fibers from %d sky block-slits",
-                 len(sky_sobjs),
-                 sum(1 for b in blocks if b['type'] == 'sky'))
-        return sky_sobjs
-
-    def _build_sky_model(self, sky_sobjs, throughput_corr):
-        """
-        Build a B-spline sky model from extracted sky fiber spectra.
-
-        Collects wavelength and flux from all sky fibers, applies
-        throughput corrections, and fits a B-spline with iterative
-        sigma-clipping rejection.
-
-        Parameters
-        ----------
-        sky_sobjs : :class:`~pypeit.specobjs.SpecObjs`
-            Extracted sky fiber SpecObjs (from :meth:`_extract_sky_fibers`).
-        throughput_corr : `numpy.ndarray`_
-            Multiplicative throughput correction for each sky fiber.
-            Shape ``(len(sky_sobjs),)``.
-
-        Returns
-        -------
-        sset : :class:`~pypeit.bspline.bspline.bspline` or None
-            Fitted B-spline sky model, or None if fitting failed.
-        """
-        from pypeit.core import fitting
-
-        if len(sky_sobjs) == 0:
-            log.warning("No sky fibers available for sky model fitting")
-            return None
-
-        # Collect wavelength, flux, and ivar from all sky fibers
-        all_wave = []
-        all_flux = []
-        all_ivar = []
-        for i, sobj in enumerate(sky_sobjs):
-            wave = sobj.BOX_WAVE
-            counts = sobj.BOX_COUNTS
-            ivar = sobj.BOX_COUNTS_IVAR
-            mask = sobj.BOX_MASK
-            npix = sobj.BOX_NPIX
-
-            if wave is None or counts is None:
-                continue
-
-            # Convert from boxcar-integrated (summed) flux to per-pixel
-            # flux.  BOX_COUNTS is the sum across the spatial aperture;
-            # dividing by BOX_NPIX gives the mean per-pixel value, which
-            # is what we need for the 2D sky model (evaluated per pixel).
-            npix_safe = np.where(npix > 0, npix, 1.0)
-            per_pix_counts = counts / npix_safe
-            per_pix_ivar = ivar * npix_safe**2
-
-            # Apply throughput correction: scale counts to a common
-            # throughput level.  The ivar scales as 1/corr^2.
-            corr = throughput_corr[i]
-            corrected_counts = per_pix_counts * corr
-            corrected_ivar = per_pix_ivar / (corr**2) if corr > 0 \
-                else np.zeros_like(per_pix_ivar)
-
-            # Only use good pixels with positive wavelength
-            good = mask & (wave > 0) & (npix > 0)
-            all_wave.append(wave[good])
-            all_flux.append(corrected_counts[good])
-            all_ivar.append(corrected_ivar[good])
-
-        if len(all_wave) == 0:
-            log.warning("No valid sky fiber data for sky model fitting")
-            return None
-
-        all_wave = np.concatenate(all_wave)
-        all_flux = np.concatenate(all_flux)
-        all_ivar = np.concatenate(all_ivar)
-
-        # Sort by wavelength for the B-spline fitter
-        srt = np.argsort(all_wave)
-        all_wave = all_wave[srt]
-        all_flux = all_flux[srt]
-        all_ivar = all_ivar[srt]
-
-        log.info("Fitting B-spline sky model to %d pixels from %d sky fibers",
-                 len(all_wave), len(sky_sobjs))
-
-        # Fit with B-spline: flat basis (no spatial variation)
-        bsp = self.par['reduce']['skysub']['bspline_spacing']
-        try:
-            sset, outmask, yfit, _, exit_status = fitting.bspline_profile(
-                all_wave, all_flux, all_ivar,
-                np.ones((len(all_wave), 1)),  # flat profile basis
-                nord=4, upper=3.0, lower=3.0,
-                kwargs_bspline={'bkspace': bsp})
-        except Exception as e:
-            log.warning("B-spline sky model fit failed: %s", str(e))
-            return None
-
-        if exit_status > 1:
-            log.warning("B-spline sky model fit did not converge "
-                        "(exit_status=%d)", exit_status)
-            return None
-
-        n_rejected = np.sum(~outmask)
-        log.info("Sky model fit: %d/%d pixels rejected (%.1f%%)",
-                 n_rejected, len(outmask),
-                 100.0 * n_rejected / len(outmask) if len(outmask) > 0 else 0.0)
-        return sset
-
-    def _project_sky_to_2d(self, sky_bspline):
-        """
-        Project a 1D B-spline sky model into a 2D sky image.
-
-        Evaluates the sky bspline at each pixel's wavelength using
-        :attr:`waveimg`.
-
-        Parameters
-        ----------
-        sky_bspline : :class:`~pypeit.bspline.bspline.bspline`
-            Fitted B-spline sky model from :meth:`_build_sky_model`.
-
-        Returns
-        -------
-        sky_2d : `numpy.ndarray`_
-            2D sky model image with the same shape as :attr:`sciImg.image`.
-        """
-        sky_2d = np.zeros_like(self.waveimg)
-        valid = self.waveimg > 0
-        if np.any(valid):
-            sky_vals, sky_mask = sky_bspline.value(self.waveimg[valid])
-            # Only fill pixels where the bspline evaluation was good
-            sky_2d[valid] = sky_vals * sky_mask
-        log.info("Projected sky model to 2D image (%d valid pixels)",
-                 np.sum(valid))
-        return sky_2d
 
     def find_objects_pypeline(self, image, ivar, std_trace=None,
                               manual_extract_dict=None,

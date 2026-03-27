@@ -2100,34 +2100,31 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
     def get_sky_fiber_mask(self, det: int, nslits: int) -> np.ndarray:
         """
-        Return a boolean mask identifying which fiber/slit indices are
-        dedicated sky fibers.
+        Return a boolean mask identifying which slit indices are
+        dedicated sky slits.
 
-        The Binospec IFU has 40 dedicated sky fibers per side, located
-        at the outermost ring of each hexagonal sub-bundle. These fibers
-        observe blank sky and are used for sky subtraction.
+        In the block-slit model, sky fibers are grouped into sky
+        block-slits. This method identifies which of the 21 block-slits
+        contain sky fibers (blocks 1, 6, 11, 16, 21 in the reference
+        profile, corresponding to 0-based block indices 0, 5, 10, 15, 20).
 
         Args:
             det (:obj:`int`):
                 1-indexed detector number.
             nslits (:obj:`int`):
-                Total number of detected fiber traces (slits).
+                Total number of block-slits.
 
         Returns:
             `numpy.ndarray`_: Boolean array of shape (nslits,), True for
-            sky fibers.
+            sky block-slits.
         """
-        nfibers = self.nfibers_a if det == 1 else self.nfibers_b
-        sky_mask = np.zeros(nfibers, dtype=bool)
-        valid_sky = self.sky_fiber_indices_0based[self.sky_fiber_indices_0based < nfibers]
-        sky_mask[valid_sky] = True
-        # If fewer traces detected than expected, truncate
-        if nslits < nfibers:
-            log.warning(f"Detected {nslits} fiber traces but expected {nfibers}. "
-                        f"Sky fiber mask may be incomplete.")
-            sky_mask = sky_mask[:nslits]
-        elif nslits > nfibers:
-            sky_mask = np.pad(sky_mask, (0, nslits - nfibers), constant_values=False)
+        blocks = self.get_fiber_blocks(det)
+        sky_mask = np.zeros(nslits, dtype=bool)
+        for i, block in enumerate(blocks):
+            if i >= nslits:
+                break
+            if block['type'] == 'sky':
+                sky_mask[i] = True
         return sky_mask
 
     def get_science_fiber_layout_indices(self, det: int,
