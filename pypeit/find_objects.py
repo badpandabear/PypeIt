@@ -1547,18 +1547,28 @@ class FiberFindObjects(SlicerIFUFindObjects):
             counts = sobj.BOX_COUNTS
             ivar = sobj.BOX_COUNTS_IVAR
             mask = sobj.BOX_MASK
+            npix = sobj.BOX_NPIX
 
             if wave is None or counts is None:
                 continue
 
+            # Convert from boxcar-integrated (summed) flux to per-pixel
+            # flux.  BOX_COUNTS is the sum across the spatial aperture;
+            # dividing by BOX_NPIX gives the mean per-pixel value, which
+            # is what we need for the 2D sky model (evaluated per pixel).
+            npix_safe = np.where(npix > 0, npix, 1.0)
+            per_pix_counts = counts / npix_safe
+            per_pix_ivar = ivar * npix_safe**2
+
             # Apply throughput correction: scale counts to a common
             # throughput level.  The ivar scales as 1/corr^2.
             corr = throughput_corr[i]
-            corrected_counts = counts * corr
-            corrected_ivar = ivar / (corr**2) if corr > 0 else np.zeros_like(ivar)
+            corrected_counts = per_pix_counts * corr
+            corrected_ivar = per_pix_ivar / (corr**2) if corr > 0 \
+                else np.zeros_like(per_pix_ivar)
 
             # Only use good pixels with positive wavelength
-            good = mask & (wave > 0)
+            good = mask & (wave > 0) & (npix > 0)
             all_wave.append(wave[good])
             all_flux.append(corrected_counts[good])
             all_ivar.append(corrected_ivar[good])
