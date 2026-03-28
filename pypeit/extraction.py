@@ -973,9 +973,12 @@ class FiberExtract(Extract):
         """
         Extract fiber spectra from block-slits without local sky subtraction.
 
-        For each block-slit, performs boxcar and Horne (1986) optimal extraction
-        for every fiber SpecObj using flat-derived empirical profiles. The global
-        sky model is used directly (no local sky subtraction).
+        For each block-slit, performs Horne (1986) optimal extraction for every
+        fiber SpecObj using flat-derived empirical profiles. The global sky model
+        is used directly (no local sky subtraction). Boxcar extraction is skipped
+        for fibers whose ``BOX_COUNTS`` attribute is already populated (e.g., by
+        :class:`~pypeit.find_objects.FiberFindObjects`), which performs boxcar
+        extraction and 1D sky subtraction as part of object finding.
 
         Parameters
         ----------
@@ -1039,15 +1042,17 @@ class FiberExtract(Extract):
             thismask = slitid_img == sobj.SLITID
             sobj_inmask = inmask & thismask
 
-            # Boxcar extraction -- extract_boxcar uses BOX_R_PIX around
-            # TRACE_SPAT, so it correctly extracts within the wider block-slit
-            sobj.extract_boxcar(
-                imgminsky, self.sciImg.ivar, sobj_inmask,
-                self.waveimg, extract_sky,
-                fwhmimg=self.fwhmimg, flatimg=self.flatimg,
-                base_var=self.sciImg.base_var,
-                count_scale=self.sciImg.img_scale,
-                noise_floor=self.sciImg.noise_floor)
+            # Boxcar extraction -- skip if already done by FiberFindObjects
+            if sobj.BOX_COUNTS is None:
+                # extract_boxcar uses BOX_R_PIX around TRACE_SPAT, so it
+                # correctly extracts within the wider block-slit
+                sobj.extract_boxcar(
+                    imgminsky, self.sciImg.ivar, sobj_inmask,
+                    self.waveimg, extract_sky,
+                    fwhmimg=self.fwhmimg, flatimg=self.flatimg,
+                    base_var=self.sciImg.base_var,
+                    count_scale=self.sciImg.img_scale,
+                    noise_floor=self.sciImg.noise_floor)
 
             # Optimal extraction using flat-derived 2D profile
             prof_key = (sobj.SLITID, sobj.OBJID)
@@ -1065,8 +1070,10 @@ class FiberExtract(Extract):
                 self._optimal_extract_fiber(
                     sobj, slitid_img, inmask, global_sky, None)
 
-        # Apply post-extraction throughput corrections
-        if hasattr(self.spectrograph, 'apply_throughput_corrections'):
+        # Throughput corrections for the Fiber pypeline are handled by
+        # superflat/fiberflat equalization in FiberFindObjects; skip here.
+        if self.spectrograph.pypeline != 'Fiber' and \
+                hasattr(self.spectrograph, 'apply_throughput_corrections'):
             self.spectrograph.apply_throughput_corrections(self.sobjs, self.det)
 
         # Set the bit for pixels masked by extraction
