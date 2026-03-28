@@ -13,6 +13,7 @@ import numpy as np
 from scipy import interpolate, ndimage
 
 from astropy.io import fits
+from astropy.table import Table
 
 from matplotlib import pyplot as plt
 from matplotlib import gridspec
@@ -476,6 +477,141 @@ class FlatImages(calibframe.CalibFrame):
                               (0.9, 1.1), (0.95, 1.05), (0.9, 1.1), None])
         # Display frames
         show_flats(image_list, wcs_match=wcs_match, slits=slits, waveimg=self.pixelflat_waveimg)
+
+
+class FiberFlatImages(datamodel.DataContainer):
+    """
+    Container for processed flat-field calibrations specific to fiber-fed spectrographs.
+
+    Holds the superflat (common spectral response), per-fiber relative throughput
+    (fiberflat), per-fiber scale factors, overall throughput ratio, fiber IDs, and
+    fiber types derived from the flat-field reduction of a fiber spectrograph.
+
+    All of the items in the datamodel can be None.
+
+    The datamodel attributes are:
+
+    .. include:: ../include/class_datamodel_fiberflatimages.rst
+
+    """
+
+    version = '1.0.0'
+
+    hdu_prefix = None
+
+    datamodel = {
+        'PYP_SPEC': dict(otype=str,
+                         descr='PypeIt spectrograph name'),
+        'superflat': dict(otype=np.ndarray, atype=np.floating,
+                          descr='1D superflat giving the common spectral response'),
+        'superflat_wave': dict(otype=np.ndarray, atype=np.floating,
+                               descr='Wavelength array corresponding to superflat'),
+        'fiberflat': dict(otype=np.ndarray, atype=np.floating,
+                          descr='2D per-fiber relative throughput array (nfibers, nwave)'),
+        'fiber_scale_factors': dict(otype=np.ndarray, atype=np.floating,
+                                    descr='Per-fiber scale factors derived from flat field'),
+        'throughput_ratio': dict(otype=float,
+                                 descr='Overall throughput ratio from flat field'),
+        'fiber_ids': dict(otype=np.ndarray, atype=np.integer,
+                          descr='Fiber ID numbers'),
+        'fiber_types': dict(otype=np.ndarray, atype=str,
+                            descr='Fiber type labels (e.g. sky, science)'),
+    }
+
+    internals = ['calib_key', 'calib_dir']
+
+    def __init__(self, superflat=None, superflat_wave=None, fiberflat=None,
+                 fiber_scale_factors=None, throughput_ratio=None, fiber_ids=None,
+                 fiber_types=None, PYP_SPEC=None):
+        # Parse
+        args, _, _, values = inspect.getargvalues(inspect.currentframe())
+        d = dict([(k, values[k]) for k in args[1:]])
+        # Setup the DataContainer
+        datamodel.DataContainer.__init__(self, d=d)
+
+    def _bundle(self):
+        """
+        Override the default _bundle() method to write one HDU per field.
+        Numeric arrays are written as ImageHDUs.  The ``fiber_types`` string
+        array is written as a single-column BinTableHDU.  Scalar values
+        (``PYP_SPEC``, ``throughput_ratio``) are stored as header cards in
+        each extension.
+
+        Returns:
+            :obj:`list`: A list of single-item dictionaries, one per
+            non-None field, each written to its own FITS extension.
+        """
+        scalar_keys = ('PYP_SPEC', 'throughput_ratio')
+        # Scalar header entries to attach to each extension
+        scalars = {}
+        if self.PYP_SPEC is not None:
+            scalars['PYP_SPEC'] = self.PYP_SPEC
+        if self.throughput_ratio is not None:
+            scalars['throughput_ratio'] = self.throughput_ratio
+
+        d = []
+        for key in self.keys():
+            if self[key] is None or key in scalar_keys:
+                continue
+            if key == 'fiber_types':
+                # String arrays cannot be stored in ImageHDU; use an
+                # astropy Table so dict_to_hdu routes to BinTableHDU.
+                tbl = Table({key: self[key]})
+                for sk, sv in scalars.items():
+                    tbl.meta[sk] = sv
+                entry = {key: tbl}
+            else:
+                # Numeric arrays: scalar header cards go alongside the array
+                # and land in the extension header via dict_to_hdu.
+                entry = {key: self[key]}
+                entry.update(scalars)
+            d.append({key: entry})
+        return d
+
+    @classmethod
+    def _parse(cls, hdu, ext=None, transpose_table_arrays=False, hdu_prefix=None, **kwargs):
+        """
+        Override the base-class parser to convert the ``fiber_types``
+        BinTableHDU back from an ``astropy.table.Table`` to a plain
+        ``numpy.ndarray``.
+
+        See :func:`~pypeit.datamodel.DataContainer._parse` for argument
+        descriptions and return values.
+        """
+        d, version_passed, type_passed, parsed_hdus = super()._parse(
+            hdu, ext=ext, transpose_table_arrays=transpose_table_arrays,
+            hdu_prefix=hdu_prefix, **kwargs)
+        # The base _parse reads BinTableHDUs (when the extension name matches
+        # a datamodel key) as astropy Tables.  Convert fiber_types back to a
+        # plain numpy array.
+        if isinstance(d.get('fiber_types'), Table):
+            d['fiber_types'] = np.asarray(d['fiber_types']['fiber_types'])
+        return d, version_passed, type_passed, parsed_hdus
+
+    def set_paths(self, calib_dir, calib_key, det_str):
+        """
+        Set the internals needed to construct the I/O path for this file.
+
+        Args:
+            calib_dir (:obj:`str`, `Path`_):
+                Directory where the calibration file will be written.
+            calib_key (:obj:`str`):
+                Calibration key string identifying the setup/configuration.
+            det_str (:obj:`str`):
+                Detector string identifier (e.g. ``'DET01'``).
+        """
+        self.calib_dir = str(Path(calib_dir).absolute())
+        self.calib_key = f'{calib_key}_{det_str}'
+
+    def get_path(self):
+        """
+        Return the full path to the output file based on :attr:`calib_dir` and
+        :attr:`calib_key`.
+
+        Returns:
+            `Path`_: Absolute path to the output FITS file.
+        """
+        return Path(self.calib_dir) / f'FiberFlat_{self.calib_key}.fits'
 
 
 class FlatField:
