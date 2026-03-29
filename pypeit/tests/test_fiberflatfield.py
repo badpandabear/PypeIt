@@ -48,25 +48,36 @@ def test_fiberflatimages_io():
 
 
 def test_superflat_construction():
-    """Test superflat from synthetic fiber spectra with known properties."""
+    """Test superflat from synthetic fiber spectra with known properties.
+
+    Creates 8 science fibers and 2 sky fibers.  Science fibers have similar
+    throughput (~1.0); sky fibers have 3x throughput.  The superflat is built
+    from science fibers only, so science fiberflats should be near 1.0 and
+    sky fiberflats should be near 3.0.
+    """
     np.random.seed(42)
-    nfibers = 10
+    n_sci = 8
+    n_sky = 2
+    nfibers = n_sci + n_sky
     nwave = 500
     wave_grid = np.linspace(4000.0, 7000.0, nwave)
 
     # Common spectral shape: quadratic (simulating lamp spectrum)
     true_shape = 1.0 - 0.3 * ((wave_grid - 5500.0) / 1500.0) ** 2
-    true_shape /= np.median(true_shape)
 
-    # Per-fiber scale factors (throughputs)
-    true_scales = np.linspace(0.5, 1.5, nfibers)
+    # Science fibers: throughput ~1.0 with small variations
+    # Sky fibers: throughput ~3.0
+    true_scales = np.ones(nfibers)
+    true_scales[:n_sci] = np.random.uniform(0.9, 1.1, n_sci)
+    true_scales[n_sci:] = 3.0  # sky fibers
+    fiber_types = np.array(['science'] * n_sci + ['sky'] * n_sky)
 
-    # Generate fiber spectra: shape * scale + noise
+    # Generate fiber spectra
     fiber_spectra = np.zeros((nfibers, nwave))
     fiber_ivar = np.zeros((nfibers, nwave))
     for i in range(nfibers):
         flux = true_scales[i] * true_shape * 10000.0
-        noise = np.sqrt(flux)
+        noise = np.sqrt(np.abs(flux)) + 1.0
         fiber_spectra[i] = flux + np.random.normal(0, 1, nwave) * noise
         fiber_ivar[i] = 1.0 / (noise ** 2)
 
@@ -76,21 +87,21 @@ def test_superflat_construction():
         offset = np.random.uniform(-2.0, 2.0)
         fiber_waves[i] = wave_grid + offset
 
-    superflat, superflat_wave, fiberflat, scale_factors = \
+    superflat, superflat_wave, fiberflat = \
         FiberFlatField.build_superflat_fiberflat(
-            fiber_spectra, fiber_waves, fiber_ivar)
+            fiber_spectra, fiber_waves, fiber_ivar, fiber_types)
 
-    # Scale factors should correlate with true scales
-    rank_true = np.argsort(true_scales)
-    rank_measured = np.argsort(scale_factors)
-    assert np.array_equal(rank_true, rank_measured), \
-        f"Scale factor ranking mismatch: {scale_factors}"
+    # Science fiber fiberflats should be near 1.0
+    for i in range(n_sci):
+        med = np.median(fiberflat[i])
+        assert 0.8 < med < 1.2, \
+            f"Science fiber {i} fiberflat median={med:.3f}, expected ~1.0"
 
-    # Fiberflats should be near unity
-    for i in range(nfibers):
-        assert np.all(np.abs(fiberflat[i] - 1.0) < 0.1), \
-            f"Fiberflat {i} deviates too far from unity: " \
-            f"range [{fiberflat[i].min():.3f}, {fiberflat[i].max():.3f}]"
+    # Sky fiber fiberflats should be near 3.0 (the throughput ratio)
+    for i in range(n_sci, nfibers):
+        med = np.median(fiberflat[i])
+        assert 2.5 < med < 3.5, \
+            f"Sky fiber {i} fiberflat median={med:.3f}, expected ~3.0"
 
     # Superflat should show the quadratic shape
     mid = nwave // 2

@@ -2070,16 +2070,22 @@ class FiberFlatField(FlatField):
         fiber_types = np.array(all_fiber_types)
 
         # ------------------------------------------------------------------
-        # Step 4: build superflat / fiberflat and throughput ratio
+        # Step 4: build superflat / fiberflat
         # ------------------------------------------------------------------
         log.info("Building superflat and per-fiber fiberflats")
-        superflat, superflat_wave, fiberflat, scale_factors = \
+        superflat, superflat_wave, fiberflat = \
             self.build_superflat_fiberflat(
-                fiber_spectra_arr, fiber_waves_arr, fiber_ivar_arr)
+                fiber_spectra_arr, fiber_waves_arr, fiber_ivar_arr,
+                fiber_types)
 
-        throughput_ratio = self.compute_throughput_ratio(
-            scale_factors, fiber_types)
-        log.info(f"Sky/science throughput ratio = {throughput_ratio:.4f}")
+        # Log the median fiberflat for sky vs science as a diagnostic
+        sky_mask = np.array([t.lower() == 'sky' for t in fiber_types])
+        if np.any(sky_mask):
+            sky_ff_med = np.median(fiberflat[sky_mask])
+            sci_ff_med = np.median(fiberflat[~sky_mask])
+            log.info(f"Median fiberflat: sky={sky_ff_med:.3f}, "
+                     f"science={sci_ff_med:.3f}, "
+                     f"ratio={sky_ff_med/sci_ff_med:.3f}")
 
         # ------------------------------------------------------------------
         # Step 5: assemble and return output containers
@@ -2090,12 +2096,15 @@ class FiberFlatField(FlatField):
             PYP_SPEC=self.spectrograph.name,
             spat_id=self.slits.spat_id)
 
+        # Scale factors and throughput ratio are no longer needed —
+        # the fiberflat encodes the full throughput correction including
+        # the sky/science difference.
         fiber_flatimages = FiberFlatImages(
             superflat=superflat,
             superflat_wave=superflat_wave,
             fiberflat=fiberflat,
-            fiber_scale_factors=scale_factors,
-            throughput_ratio=throughput_ratio,
+            fiber_scale_factors=np.ones(len(fiber_ids)),
+            throughput_ratio=1.0,
             fiber_ids=fiber_ids,
             fiber_types=fiber_types,
             PYP_SPEC=self.spectrograph.name)
@@ -2104,81 +2113,86 @@ class FiberFlatField(FlatField):
 
     @staticmethod
     def build_superflat_fiberflat(fiber_spectra, fiber_waves, fiber_ivar,
-                                  bkspace=1.5):
+                                  fiber_types, bkspace=1.5):
         """
         Build the superflat and per-fiber fiberflat from extracted flat spectra.
 
-        The algorithm is:
+        Follows the MaNGA DRP approach (Law et al. 2016) adapted for
+        Binospec-style IFUs with dedicated sky fibers:
 
-        1. Compute a per-fiber scale factor as the median flux of each fiber.
-        2. Normalize each fiber spectrum to median = 1.
-        3. Combine all fibers into a single super-sampled array (sorted by
-           wavelength) and fit a B-spline to obtain the superflat.
-        4. Evaluate the superflat on a common wavelength grid.
-        5. For each fiber, divide its spectrum by (scale * superflat) and
-           B-spline smooth the result to obtain the fiberflat on the common
-           grid.
+        1. Build the superflat from **science fibers only** (un-normalized)
+           by combining into a super-sampled wavelength array and fitting a
+           B-spline.  This captures the lamp spectrum times the average
+           science-fiber throughput.
+        2. Divide the science-fiber superflat into **all** fibers (sky and
+           science) to produce per-fiber fiberflats.  Science fiber
+           fiberflats will be near 1.0.  Sky fiber fiberflats will encode
+           the actual throughput ratio between sky and science fibers
+           (~3x for Binospec), enabling correct equalization for sky
+           subtraction.
 
         Parameters
         ----------
         fiber_spectra : `numpy.ndarray`_
-            Extracted flat-field spectra for each fiber, shape
-            ``(nfibers, nwave)``.
+            Extracted flat-field spectra, shape ``(nfibers, nwave)``.
+            These should have scattered light already subtracted.
         fiber_waves : `numpy.ndarray`_
-            Wavelength array for each fiber, shape ``(nfibers, nwave)``.
+            Wavelength array per fiber, shape ``(nfibers, nwave)``.
         fiber_ivar : `numpy.ndarray`_
-            Inverse variance for each fiber spectrum, shape
-            ``(nfibers, nwave)``.
+            Inverse variance per fiber, shape ``(nfibers, nwave)``.
+        fiber_types : `numpy.ndarray`_
+            Fiber type per fiber: ``'sky'`` or ``'science'``.
         bkspace : :obj:`float`, optional
-            Breakpoint spacing in wavelength units used for the superflat
-            B-spline fit.  The fiberflat smoothing uses ``bkspace * 5``.
-            Default is 1.5.
+            Breakpoint spacing in wavelength units for the superflat
+            B-spline.  Fiberflat smoothing uses ``bkspace * 5``.
 
         Returns
         -------
         superflat : `numpy.ndarray`_
-            1-D superflat evaluated on the common wavelength grid, shape
-            ``(nwave,)``.
+            1-D superflat on the common wavelength grid, shape ``(nwave,)``.
         superflat_wave : `numpy.ndarray`_
             Common wavelength grid, shape ``(nwave,)``.
         fiberflat : `numpy.ndarray`_
-            Per-fiber fiberflat evaluated on the common wavelength grid,
-            shape ``(nfibers, nwave)``.
-        scale_factors : `numpy.ndarray`_
-            Per-fiber median flux scale factors, shape ``(nfibers,)``.
+            Per-fiber fiberflat on the common wavelength grid,
+            shape ``(nfibers, nwave)``.  Science fibers are near 1.0;
+            sky fibers encode the throughput ratio.
         """
         from pypeit.core import fitting
 
         nfibers, nwave = fiber_spectra.shape
+        sci_mask = np.array([t.lower() != 'sky' for t in fiber_types])
 
         # ------------------------------------------------------------------
-        # Step 1: per-fiber scale factors and normalized spectra
+        # Step 1: build superflat from science fibers (un-normalized)
         # ------------------------------------------------------------------
-        scale_factors = np.zeros(nfibers, dtype=float)
-        norm_spectra = np.zeros_like(fiber_spectra)
-        norm_ivar = np.zeros_like(fiber_ivar)
+        # Combine all science fiber spectra into a super-sampled array
+        # sorted by wavelength.  No per-fiber normalization — the raw
+        # counts carry the throughput information.
+        all_wave, all_flux, all_ivar = [], [], []
         for i in range(nfibers):
-            scale = np.median(fiber_spectra[i])
-            if scale <= 0.0:
-                scale = 1.0
-            scale_factors[i] = scale
-            norm_spectra[i] = fiber_spectra[i] / scale
-            norm_ivar[i] = fiber_ivar[i] * scale ** 2
+            if not sci_mask[i]:
+                continue
+            good = (fiber_ivar[i] > 0) & np.isfinite(fiber_spectra[i]) \
+                   & (fiber_waves[i] > 0)
+            if not np.any(good):
+                continue
+            all_wave.append(fiber_waves[i, good])
+            all_flux.append(fiber_spectra[i, good])
+            all_ivar.append(fiber_ivar[i, good])
 
-        # ------------------------------------------------------------------
-        # Step 2: combine into super-sampled array sorted by wavelength
-        # ------------------------------------------------------------------
-        all_wave = fiber_waves.ravel()
-        all_flux = norm_spectra.ravel()
-        all_ivar = norm_ivar.ravel()
-        sort_idx = np.argsort(all_wave)
-        all_wave = all_wave[sort_idx]
-        all_flux = all_flux[sort_idx]
-        all_ivar = all_ivar[sort_idx]
+        all_wave = np.concatenate(all_wave)
+        all_flux = np.concatenate(all_flux)
+        all_ivar = np.concatenate(all_ivar)
 
-        # ------------------------------------------------------------------
-        # Step 3: B-spline fit for the superflat
-        # ------------------------------------------------------------------
+        srt = np.argsort(all_wave)
+        all_wave = all_wave[srt]
+        all_flux = all_flux[srt]
+        all_ivar = all_ivar[srt]
+
+        n_sci = int(np.sum(sci_mask))
+        log.info(f"Building superflat from {n_sci} science fibers "
+                 f"({len(all_wave)} pixels)")
+
         profile_basis = np.ones((len(all_wave), 1))
         sset, _, _, _, exit_status = fitting.bspline_profile(
             all_wave, all_flux, all_ivar, profile_basis,
@@ -2189,35 +2203,48 @@ class FiberFlatField(FlatField):
                         f'{exit_status}.')
 
         # ------------------------------------------------------------------
-        # Step 4: evaluate on common wavelength grid
-        # Use the intersection of individual fiber wavelength ranges so that
-        # every fiber has coverage over the full grid (avoids edge
-        # extrapolation when fitting per-fiber fiberflats).
+        # Step 2: evaluate on common wavelength grid
         # ------------------------------------------------------------------
-        wmin = fiber_waves.min(axis=1).max()
-        wmax = fiber_waves.max(axis=1).min()
+        wmin = fiber_waves[fiber_waves > 0].min()
+        wmax = fiber_waves[fiber_waves > 0].max()
         superflat_wave = np.linspace(wmin, wmax, nwave)
         superflat, _ = sset.value(superflat_wave)
 
         # ------------------------------------------------------------------
-        # Step 5: per-fiber fiberflat
+        # Step 3: per-fiber fiberflat = fiber / superflat
         # ------------------------------------------------------------------
+        # Science fibers → fiberflat ≈ 1.0
+        # Sky fibers → fiberflat ≈ throughput_ratio (e.g. ~3x)
         fiberflat = np.ones((nfibers, nwave), dtype=float)
         for i in range(nfibers):
-            ratio = fiber_spectra[i] / (scale_factors[i] * np.interp(
-                fiber_waves[i], superflat_wave, superflat))
-            ratio_ivar = fiber_ivar[i] * scale_factors[i] ** 2
+            sf_at_fiber = np.interp(fiber_waves[i], superflat_wave,
+                                    superflat)
+            # Mask low-throughput regions where superflat is near zero
+            good = (sf_at_fiber > 0.01 * np.median(superflat)) \
+                   & (fiber_ivar[i] > 0) & np.isfinite(fiber_spectra[i])
+            if np.sum(good) < 10:
+                continue
+            ratio = np.ones_like(fiber_spectra[i])
+            ratio[good] = fiber_spectra[i, good] / sf_at_fiber[good]
+            ratio_ivar = np.zeros_like(fiber_ivar[i])
+            ratio_ivar[good] = fiber_ivar[i, good] * sf_at_fiber[good] ** 2
             profile_basis_i = np.ones((len(fiber_waves[i]), 1))
-            sset_i, _, _, _, exit_status_i = fitting.bspline_profile(
-                fiber_waves[i], ratio, ratio_ivar, profile_basis_i,
-                nord=4, upper=3.0, lower=3.0,
-                kwargs_bspline={'bkspace': bkspace * 5})
-            if exit_status_i > 1:
-                log.warning(f'Fiberflat B-spline fit for fiber {i} exited '
-                            f'with status {exit_status_i}.')
-            fiberflat[i], _ = sset_i.value(superflat_wave)
+            try:
+                sset_i, _, _, _, exit_status_i = fitting.bspline_profile(
+                    fiber_waves[i], ratio, ratio_ivar, profile_basis_i,
+                    nord=4, upper=3.0, lower=3.0,
+                    kwargs_bspline={'bkspace': bkspace * 5})
+                if exit_status_i > 1:
+                    log.warning(f'Fiberflat B-spline for fiber {i} '
+                                f'exit_status={exit_status_i}')
+                fiberflat[i], _ = sset_i.value(superflat_wave)
+            except Exception:
+                log.warning(f'Fiberflat B-spline for fiber {i} failed; '
+                            f'using ratio directly')
+                fiberflat[i] = np.interp(superflat_wave, fiber_waves[i],
+                                         ratio, left=1.0, right=1.0)
 
-        return superflat, superflat_wave, fiberflat, scale_factors
+        return superflat, superflat_wave, fiberflat
 
     @staticmethod
     def compute_throughput_ratio(scale_factors, fiber_types):

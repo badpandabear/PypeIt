@@ -1507,17 +1507,6 @@ class FiberFindObjects(SlicerIFUFindObjects):
                         "skipping equalization")
             return corrections
 
-        # Normalize scale factors by their median so they represent
-        # relative fiber-to-fiber throughput differences (near 1.0),
-        # not absolute count levels (tens of thousands).
-        norm_scale_factors = None
-        if scale_factors is not None and len(scale_factors) > 0:
-            med_scale = np.median(scale_factors[scale_factors > 0])
-            if med_scale > 0:
-                norm_scale_factors = scale_factors / med_scale
-            else:
-                norm_scale_factors = np.ones_like(scale_factors)
-
         for i, sobj in enumerate(sobjs):
             fid = sobj.MASKDEF_ID
             if fid is None or fid < 0:
@@ -1531,21 +1520,18 @@ class FiberFindObjects(SlicerIFUFindObjects):
             if wave is None:
                 continue
 
-            # Interpolate superflat to this fiber's wavelengths
+            # Interpolate superflat to this fiber's wavelength grid
             sf_interp = np.interp(wave, sf_wave, sf_vals,
                                   left=1.0, right=1.0)
 
-            # Get fiberflat (stored on superflat_wave grid)
+            # Interpolate fiberflat (encodes per-fiber throughput
+            # including the sky/science difference)
             corr = sf_interp.copy()
             if fiberflat is not None and idx < fiberflat.shape[0]:
                 ff = fiberflat[idx]
                 ff_interp = np.interp(wave, sf_wave, ff,
                                       left=1.0, right=1.0)
                 corr *= ff_interp
-
-            # Apply normalized broadband scale factor (relative throughput)
-            if norm_scale_factors is not None and idx < len(norm_scale_factors):
-                corr *= norm_scale_factors[idx]
 
             corr[corr <= 0] = 1.0
             corrections[i] = corr
