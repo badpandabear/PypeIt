@@ -1520,18 +1520,16 @@ class FiberFindObjects(SlicerIFUFindObjects):
             if wave is None:
                 continue
 
-            # Interpolate superflat to this fiber's wavelength grid
-            sf_interp = np.interp(wave, sf_wave, sf_vals,
-                                  left=1.0, right=1.0)
-
-            # Interpolate fiberflat (encodes per-fiber throughput
-            # including the sky/science difference)
-            corr = sf_interp.copy()
+            # Interpolate fiberflat to this fiber's wavelength grid.
+            # The fiberflat encodes the full per-fiber throughput
+            # correction: ≈ 1.0 for science fibers, ≈ throughput_ratio
+            # for sky fibers.  The superflat was used to construct the
+            # fiberflat but is not applied at runtime.
+            corr = np.ones_like(wave)
             if fiberflat is not None and idx < fiberflat.shape[0]:
                 ff = fiberflat[idx]
-                ff_interp = np.interp(wave, sf_wave, ff,
-                                      left=1.0, right=1.0)
-                corr *= ff_interp
+                corr = np.interp(wave, sf_wave, ff,
+                                 left=1.0, right=1.0)
 
             corr[corr <= 0] = 1.0
             corrections[i] = corr

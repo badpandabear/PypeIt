@@ -2203,12 +2203,17 @@ class FiberFlatField(FlatField):
                         f'{exit_status}.')
 
         # ------------------------------------------------------------------
-        # Step 2: evaluate on common wavelength grid
+        # Step 2: evaluate on common wavelength grid and normalize
         # ------------------------------------------------------------------
         wmin = fiber_waves[fiber_waves > 0].min()
         wmax = fiber_waves[fiber_waves > 0].max()
         superflat_wave = np.linspace(wmin, wmax, nwave)
         superflat, _ = sset.value(superflat_wave)
+
+        # The superflat is in raw flat counts — this is intentional.
+        # The fiberflat (fiber / superflat) will be ≈ 1.0 for science
+        # fibers (since superflat was built from science fibers) and
+        # ≈ throughput_ratio for sky fibers.
 
         # ------------------------------------------------------------------
         # Step 3: per-fiber fiberflat = fiber / superflat
