@@ -1937,18 +1937,16 @@ class FiberFlatField(FlatField):
         det = self.rawflatimg.detector.det
 
         # ------------------------------------------------------------------
-        # Step 1: build pixel-only 2D flat via median filter along dispersion
+        # Step 1: pixelflat_norm = 1.0 (no 2D pixel correction)
         # ------------------------------------------------------------------
-        log.info("Building pixel-only 2D flat for fiber spectrograph")
-        smooth_flat = ndimage.median_filter(rawflat, size=(1, 15))
-        # Avoid division by zero
-        good_smooth = smooth_flat > 0.0
-        pixelflat_norm = np.where(good_smooth, rawflat / smooth_flat, 1.0)
-        # Clip to sensible range
-        pixelflat_norm = np.clip(pixelflat_norm, 0.5, 1.5)
-        # Set pixels outside slits to 1.0
+        # For fiber spectrographs, spectral response is handled in 1D by
+        # the superflat/fiberflat.  Bad pixels are handled by the BPM.
+        # A 2D pixel flat would need careful construction to avoid
+        # imprinting fiber profile structure, so we skip it for now.
+        log.info("Fiber pypeline: setting pixelflat_norm to unity "
+                 "(no 2D pixel correction)")
         slit_img = self.slits.slit_img(initial=True)
-        pixelflat_norm[slit_img == -1] = 1.0
+        pixelflat_norm = np.ones_like(rawflat)
 
         # ------------------------------------------------------------------
         # Step 2: build wavelength image (or pixel-coordinate proxy)
