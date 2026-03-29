@@ -1667,26 +1667,26 @@ class FiberFindObjects(SlicerIFUFindObjects):
         n_rej = np.sum(~outmask)
         log.info(f"Sky model: {n_rej}/{len(outmask)} pixels rejected")
 
+        # Wavelength range of the fit data (for clipping extrapolation)
+        wave_min = all_wave[0]
+        wave_max = all_wave[-1]
+
         # Subtract sky from all fibers
         for i, sobj in enumerate(sobjs):
             if sobj.BOX_WAVE is None or sobj.BOX_COUNTS is None:
                 continue
-            good = sobj.BOX_WAVE > 0
+            # Only evaluate sky model within the B-spline fit range
+            # to avoid wild extrapolation at wavelength edges
+            good = ((sobj.BOX_WAVE >= wave_min) & (sobj.BOX_WAVE <= wave_max))
             sky_spec = np.zeros_like(sobj.BOX_COUNTS)
             sky_spec[good] = sset.value(sobj.BOX_WAVE[good])[0].flatten()
 
             sobj.BOX_COUNTS_SKY = sky_spec.copy()
             sobj.BOX_COUNTS = sobj.BOX_COUNTS - sky_spec
 
-        # Reconstruct 2D sky image from the B-spline evaluated at each
-        # pixel's wavelength.  This is for diagnostics and for providing
-        # a sky model to downstream extraction.  We evaluate the sky
-        # model in equalized space (since the 2D image has been
-        # pixel-flat-corrected but not throughput-equalized, this is
-        # approximate — but it avoids amplifying noise through per-fiber
-        # correction factors).
+        # Reconstruct 2D sky image within the fit wavelength range
         sky_2d = np.zeros((nspec, nspat))
-        valid = self.waveimg > 0
+        valid = (self.waveimg >= wave_min) & (self.waveimg <= wave_max)
         sky_2d[valid] = sset.value(self.waveimg[valid])[0].flatten()
 
         return sky_2d
