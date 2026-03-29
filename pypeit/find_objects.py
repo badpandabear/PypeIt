@@ -1580,19 +1580,11 @@ class FiberFindObjects(SlicerIFUFindObjects):
                 sobj.BOX_COUNTS = sobj.BOX_COUNTS / corr
                 sobj.BOX_COUNTS_IVAR = sobj.BOX_COUNTS_IVAR * corr**2
 
-        # Identify sky fibers, excluding those with bad equalization
+        # Identify sky fibers
         sky_indices = []
         for i, sobj in enumerate(sobjs):
             name = sobj.MASKDEF_OBJNAME
             if name is not None and str(name).upper().startswith('SKY'):
-                # Skip fibers with extreme corrections (bad fiberflat)
-                corr = corrections[i]
-                if corr is not None and (np.max(corr) > 10.0
-                                         or np.min(corr) < 0.1):
-                    log.warning(f"Skipping sky fiber {name} (idx {i}): "
-                                f"extreme correction range "
-                                f"[{np.min(corr):.2f}, {np.max(corr):.2f}]")
-                    continue
                 sky_indices.append(i)
 
         log.info(f"Building sky model from {len(sky_indices)} sky fibers")
@@ -1600,6 +1592,16 @@ class FiberFindObjects(SlicerIFUFindObjects):
         if len(sky_indices) == 0:
             log.warning("No sky fibers found; returning zero sky model")
             return np.zeros((nspec, nspat))
+
+        # Determine the valid wavelength range from the superflat signal.
+        # Where the superflat drops below 10% of its peak, the flat has
+        # no useful signal and the fiberflat is unreliable.
+        sf_thresh = None
+        if fiber_flatimages is not None:
+            sf_peak = np.max(fiber_flatimages.superflat)
+            sf_thresh = 0.1 * sf_peak
+            log.info(f"Superflat peak={sf_peak:.1f}, "
+                     f"masking wavelengths below {sf_thresh:.1f}")
 
         # Combine sky fiber spectra
         all_wave, all_flux, all_ivar = [], [], []
@@ -1610,6 +1612,13 @@ class FiberFindObjects(SlicerIFUFindObjects):
             good = (sobj.BOX_WAVE > 0) & np.isfinite(sobj.BOX_COUNTS)
             if sobj.BOX_MASK is not None:
                 good &= sobj.BOX_MASK
+            # Mask wavelengths where the superflat has low signal
+            if sf_thresh is not None and fiber_flatimages is not None:
+                sf_at_wave = np.interp(sobj.BOX_WAVE,
+                                       fiber_flatimages.superflat_wave,
+                                       fiber_flatimages.superflat,
+                                       left=0.0, right=0.0)
+                good &= sf_at_wave > sf_thresh
             all_wave.append(sobj.BOX_WAVE[good])
             all_flux.append(sobj.BOX_COUNTS[good])
             all_ivar.append(sobj.BOX_COUNTS_IVAR[good])
