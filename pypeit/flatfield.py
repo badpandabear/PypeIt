@@ -1972,6 +1972,29 @@ class FiberFlatField(FlatField):
         skyimg = np.zeros_like(rawflat)
 
         # ------------------------------------------------------------------
+        # Step 2b: subtract scattered light from the flat for extraction
+        # ------------------------------------------------------------------
+        # The inter-block gaps contain only scattered light (~3000+ counts
+        # for Binospec).  This contaminant dilutes the throughput ratio
+        # between sky and science fibers.  Subtract the global median of
+        # inter-block pixels before extracting fiber spectra.  Set the
+        # inter-block pixels to 1.0 afterwards to avoid divide-by-zero
+        # artifacts in the pixel flat.
+        interblock = (slit_img == -1) & gpm
+        if np.any(interblock):
+            scattered_level = float(np.median(rawflat[interblock]))
+            log.info(f"Subtracting scattered light level {scattered_level:.1f} "
+                     f"from flat for fiber extraction "
+                     f"({np.sum(interblock)} inter-block pixels)")
+            rawflat_clean = rawflat - scattered_level
+            rawflat_clean[rawflat_clean < 0] = 0.0
+            rawflat_clean[slit_img == -1] = 1.0
+        else:
+            log.warning("No inter-block pixels found; skipping scattered "
+                        "light subtraction")
+            rawflat_clean = rawflat
+
+        # ------------------------------------------------------------------
         # Step 3: extract flat fibers block by block
         # ------------------------------------------------------------------
         log.info("Extracting flat spectra for all fiber blocks")
@@ -2011,13 +2034,13 @@ class FiberFlatField(FlatField):
                 half_spacings[0] = np.median(
                     self.slits.slit_img(initial=True) != -1) / 2.0
 
-            nspec = rawflat.shape[0]
+            nspec = rawflat_clean.shape[0]
             for j, center_pix in enumerate(fiber_centers):
                 trace_spat = np.full(nspec, center_pix)
                 box_r = half_spacings[j]
 
                 wave, flux, flux_ivar = extract_boxcar(
-                    box_r, trace_spat, rawflat, ivar, gpm,
+                    box_r, trace_spat, rawflat_clean, ivar, gpm,
                     waveimg, skyimg)[:3]
 
                 all_fiber_spectra.append(flux)

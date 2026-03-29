@@ -1507,6 +1507,17 @@ class FiberFindObjects(SlicerIFUFindObjects):
                         "skipping equalization")
             return corrections
 
+        # Normalize scale factors by their median so they represent
+        # relative fiber-to-fiber throughput differences (near 1.0),
+        # not absolute count levels (tens of thousands).
+        norm_scale_factors = None
+        if scale_factors is not None and len(scale_factors) > 0:
+            med_scale = np.median(scale_factors[scale_factors > 0])
+            if med_scale > 0:
+                norm_scale_factors = scale_factors / med_scale
+            else:
+                norm_scale_factors = np.ones_like(scale_factors)
+
         for i, sobj in enumerate(sobjs):
             fid = sobj.MASKDEF_ID
             if fid is None or fid < 0:
@@ -1532,9 +1543,9 @@ class FiberFindObjects(SlicerIFUFindObjects):
                                       left=1.0, right=1.0)
                 corr *= ff_interp
 
-            # Apply broadband scale factor
-            if scale_factors is not None and idx < len(scale_factors):
-                corr *= scale_factors[idx]
+            # Apply normalized broadband scale factor (relative throughput)
+            if norm_scale_factors is not None and idx < len(norm_scale_factors):
+                corr *= norm_scale_factors[idx]
 
             corr[corr <= 0] = 1.0
             corrections[i] = corr
@@ -1583,11 +1594,19 @@ class FiberFindObjects(SlicerIFUFindObjects):
                 sobj.BOX_COUNTS = sobj.BOX_COUNTS / corr
                 sobj.BOX_COUNTS_IVAR = sobj.BOX_COUNTS_IVAR * corr**2
 
-        # Identify sky fibers
+        # Identify sky fibers, excluding those with bad equalization
         sky_indices = []
         for i, sobj in enumerate(sobjs):
             name = sobj.MASKDEF_OBJNAME
             if name is not None and str(name).upper().startswith('SKY'):
+                # Skip fibers with extreme corrections (bad fiberflat)
+                corr = corrections[i]
+                if corr is not None and (np.max(corr) > 10.0
+                                         or np.min(corr) < 0.1):
+                    log.warning(f"Skipping sky fiber {name} (idx {i}): "
+                                f"extreme correction range "
+                                f"[{np.min(corr):.2f}, {np.max(corr):.2f}]")
+                    continue
                 sky_indices.append(i)
 
         log.info(f"Building sky model from {len(sky_indices)} sky fibers")
@@ -1655,8 +1674,7 @@ class FiberFindObjects(SlicerIFUFindObjects):
         n_rej = np.sum(~outmask)
         log.info(f"Sky model: {n_rej}/{len(outmask)} pixels rejected")
 
-        # Subtract sky from all fibers and reconstruct 2D sky image
-        sky_2d = np.zeros((nspec, nspat))
+        # Subtract sky from all fibers
         for i, sobj in enumerate(sobjs):
             if sobj.BOX_WAVE is None or sobj.BOX_COUNTS is None:
                 continue
@@ -1667,16 +1685,16 @@ class FiberFindObjects(SlicerIFUFindObjects):
             sobj.BOX_COUNTS_SKY = sky_spec.copy()
             sobj.BOX_COUNTS = sobj.BOX_COUNTS - sky_spec
 
-            # Reconstruct 2D sky for diagnostics (undo equalization)
-            corr = corrections[i]
-            sky_det = sky_spec * corr if corr is not None else sky_spec
-            trace = sobj.TRACE_SPAT
-            box_r = sobj.BOX_R_PIX
-            for row in range(nspec):
-                lo = max(0, int(trace[row] - box_r))
-                hi = min(nspat, int(trace[row] + box_r) + 1)
-                if hi > lo:
-                    sky_2d[row, lo:hi] = sky_det[row]
+        # Reconstruct 2D sky image from the B-spline evaluated at each
+        # pixel's wavelength.  This is for diagnostics and for providing
+        # a sky model to downstream extraction.  We evaluate the sky
+        # model in equalized space (since the 2D image has been
+        # pixel-flat-corrected but not throughput-equalized, this is
+        # approximate — but it avoids amplifying noise through per-fiber
+        # correction factors).
+        sky_2d = np.zeros((nspec, nspat))
+        valid = self.waveimg > 0
+        sky_2d[valid] = sset.value(self.waveimg[valid])[0].flatten()
 
         return sky_2d
 
