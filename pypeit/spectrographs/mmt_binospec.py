@@ -1339,20 +1339,25 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
         # (passed through to SlitTraceSet).
         par['calibrations']['slitedges']['pad'] = 0
 
-        # Scattered light correction for science frames only.
-        # Flats don't need it (used for geometry/pixel response, not flux).
-        # Each science frame gets its own model fit to inter-fiber gap pixels.
+        # Scattered light correction for ALL frames (IDL pipeline approach).
+        # Inter-block gaps contain ~3000+ counts of scattered light that must
+        # be removed from both flats and science frames for accurate
+        # fiber throughput ratios (Chilingarian et al. 2025, Section 6).
         par['calibrations']['scattlight_pad'] = 5
+        par['calibrations']['pixelflatframe']['process']['subtract_scattlight'] = True
+        par['calibrations']['pixelflatframe']['process']['scattlight']['method'] = 'gaps'
         par['scienceframe']['process']['subtract_scattlight'] = True
-        par['scienceframe']['process']['scattlight']['method'] = 'frame'
+        par['scienceframe']['process']['scattlight']['method'] = 'gaps'
 
         # Flat field: no edge tweaking for fiber-fed IFU (fixed positions)
         par['calibrations']['flatfield']['tweak_slits'] = False
         par['calibrations']['flatfield']['slit_trim'] = 0
         par['calibrations']['flatfield']['slit_illum_finecorr'] = False
 
-        # Tilts: increase spat_order for block-slits (~126px wide vs ~5px fiber slits)
-        par['calibrations']['tilts']['spat_order'] = 3
+        # Tilts: linear spatial tilts for block-slits.  Sky blocks are only
+        # ~60 px wide with few arc lines — higher orders over-fit and
+        # introduce spurious curvature that degrades sky subtraction.
+        par['calibrations']['tilts']['spat_order'] = 1
         par['calibrations']['tilts']['spec_order'] = 3
 
         # Flexure: Binospec has active flexure control, so spectral
@@ -1661,6 +1666,161 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
             right_edges[:, i] = np.clip(right_edges[:, i], 0, nspat - 1)
 
         return left_edges, right_edges
+
+    def adjust_slit_edges_to_fibers(self, slits, det):
+        """
+        Shrink slit edges to tightly wrap fiber positions from the reference
+        profile, exposing inter-block gaps for scattered light modeling.
+
+        The edge detection places slit boundaries at the midpoints of inter-block
+        gaps (~70 px wide), consuming all off-slit pixels.  This method moves
+        the edges inward to the outermost fiber positions + a small margin,
+        leaving ~55-60 px gaps between blocks for the scattered light model.
+
+        Args:
+            slits (:class:`~pypeit.slittrace.SlitTraceSet`):
+                Slit traces to modify **in place**.
+            det (:obj:`int`):
+                1-indexed detector number (1=side A, 2=side B).
+        """
+        margin = 7  # pixels beyond outermost fiber center
+
+        blocks = self.get_fiber_blocks(det)
+        if len(blocks) != slits.nslits:
+            log.warning(f"Block count ({len(blocks)}) != slit count "
+                        f"({slits.nslits}); skipping slit edge adjustment")
+            return
+
+        # Determine the bulk shift between reference and detected positions
+        # by comparing block centers.
+        mid_row = slits.nspec // 2
+        left, right, _ = slits.select_edges()
+        slit_centers = 0.5 * (left[mid_row] + right[mid_row])
+        ref_centers = np.array([0.5 * (b['min_pix'] + b['max_pix'])
+                                for b in blocks])
+        shift = np.median(slit_centers - ref_centers)
+        log.info(f"Slit edge adjustment: ref→detector shift = {shift:.1f} px")
+
+        # Build new edge arrays (constant across spectral rows)
+        new_left = np.zeros(slits.nslits)
+        new_right = np.zeros(slits.nslits)
+        for i, block in enumerate(blocks):
+            new_left[i] = block['min_pix'] + shift - margin
+            new_right[i] = block['max_pix'] + shift + margin
+
+        # Ensure edges don't extend beyond detector
+        nspat = slits.left_init.shape[0]  # Not used; edges are spatial coords
+        new_left = np.clip(new_left, 0, None)
+
+        # Log the change
+        old_gaps = np.array([left[mid_row, i+1] - right[mid_row, i]
+                             for i in range(slits.nslits - 1)])
+        new_gaps = np.array([new_left[i+1] - new_right[i]
+                             for i in range(slits.nslits - 1)])
+        log.info(f"Inter-block gaps: old median={np.median(old_gaps):.0f} px, "
+                 f"new median={np.median(new_gaps):.0f} px")
+
+        # Apply to all spectral rows (edges are constant for fiber IFU)
+        for row in range(slits.nspec):
+            slits.left_init[row, :] = new_left
+            slits.right_init[row, :] = new_right
+        # Update tweaks if they exist, otherwise they'll be None
+        # and select_edges() will fall back to left_init/right_init
+        if slits.left_tweak is not None:
+            slits.left_tweak[:] = slits.left_init
+        if slits.right_tweak is not None:
+            slits.right_tweak[:] = slits.right_init
+
+    def subtract_scattered_light_gaps(self, image, offslitmask):
+        """
+        Subtract scattered light by measuring signal in inter-block gaps
+        and interpolating across fiber blocks.
+
+        For each spectral bin, measures the median signal in each off-slit
+        gap region and linearly interpolates a smooth scattered light model
+        across the spatial direction.
+
+        Args:
+            image (`numpy.ndarray`_):
+                2D image (nspec, nspat) to measure scattered light from.
+            offslitmask (`numpy.ndarray`_):
+                Boolean mask, True for off-slit (gap) pixels.
+
+        Returns:
+            `numpy.ndarray`_: 2D scattered light model, same shape as image.
+        """
+        from scipy.ndimage import uniform_filter1d
+
+        nspec, nspat = image.shape
+        scatt_img = np.zeros_like(image)
+
+        # Find contiguous off-slit gap regions from the mask at midpoint row
+        mid_row = nspec // 2
+        offslit = offslitmask[mid_row, :]
+
+        # Identify gap boundaries
+        edges = np.diff(offslit.astype(np.int8))
+        gap_starts = np.where(edges == 1)[0] + 1
+        gap_ends = np.where(edges == -1)[0] + 1
+
+        # Handle cases where the image starts/ends in a gap
+        if offslit[0]:
+            gap_starts = np.concatenate(([0], gap_starts))
+        if offslit[-1]:
+            gap_ends = np.concatenate((gap_ends, [nspat]))
+
+        n_gaps = min(len(gap_starts), len(gap_ends))
+        if n_gaps < 2:
+            log.warning("Fewer than 2 inter-block gaps found; "
+                        "cannot model scattered light from gaps")
+            return scatt_img
+
+        gap_starts = gap_starts[:n_gaps]
+        gap_ends = gap_ends[:n_gaps]
+        gap_mids = 0.5 * (gap_starts + gap_ends)
+
+        log.info(f"Scattered light from gaps: {n_gaps} gaps, "
+                 f"median width {np.median(gap_ends - gap_starts):.0f} px")
+
+        # Process in spectral bins for efficiency
+        bin_size = 32
+        n_bins = (nspec + bin_size - 1) // bin_size
+
+        for ibin in range(n_bins):
+            row_lo = ibin * bin_size
+            row_hi = min(row_lo + bin_size, nspec)
+
+            # Median across the spectral bin
+            strip = np.median(image[row_lo:row_hi, :], axis=0)
+
+            # Measure median signal in each gap (excluding edge pixels
+            # that may contain fiber wing flux)
+            gap_vals = np.zeros(n_gaps)
+            for ig in range(n_gaps):
+                gs, ge = int(gap_starts[ig]), int(gap_ends[ig])
+                width = ge - gs
+                margin = max(3, width // 5)
+                inner = strip[gs + margin:ge - margin]
+                if len(inner) > 0:
+                    gap_vals[ig] = np.median(inner)
+                else:
+                    gap_vals[ig] = np.median(strip[gs:ge])
+
+            # Interpolate between gap midpoints (linear, constant beyond)
+            scatt_profile = np.interp(np.arange(nspat), gap_mids, gap_vals)
+
+            # Apply to all rows in the bin
+            scatt_img[row_lo:row_hi, :] = scatt_profile[np.newaxis, :]
+
+        # Smooth along spectral direction to remove binning steps
+        scatt_img = uniform_filter1d(scatt_img, size=bin_size, axis=0,
+                                     mode='nearest')
+
+        log.info(f"Scattered light model: "
+                 f"median={np.median(scatt_img):.0f}, "
+                 f"range=[{np.min(scatt_img):.0f}, {np.max(scatt_img):.0f}]")
+
+        return scatt_img
 
     def get_fiber_blocks(self, det):
         """

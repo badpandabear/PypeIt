@@ -1915,8 +1915,8 @@ class IFUCalibrations(Calibrations):
         :class:`~pypeit.flatfield.FiberFlatField` instead of the standard
         :class:`~pypeit.flatfield.FlatField`, producing both the standard
         :class:`~pypeit.flatfield.FlatImages` (pixel-only flat) and a
-        :class:`~pypeit.flatfield.FiberFlatImages` (superflat, fiberflat,
-        throughput corrections).
+        :class:`~pypeit.flatfield.FiberFlatImages` (globally-normalized
+        extracted flat, fiber metadata).
 
         For all other IFU spectrographs, falls back to the parent
         :meth:`Calibrations.get_flats`.
@@ -2025,6 +2025,12 @@ class IFUCalibrations(Calibrations):
 
         # Perform a check on the files
         self.check_calibrations(raw_pixel_files)
+
+        # Adjust slit edges to fiber reference positions so that
+        # inter-block gaps are exposed for scattered light modeling.
+        if hasattr(self.spectrograph, 'adjust_slit_edges_to_fibers'):
+            self.spectrograph.adjust_slit_edges_to_fibers(
+                self.slits, self.det)
 
         log.info('Creating fiber flat calibration frame using files: ')
         for f in raw_pixel_files:

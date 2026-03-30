@@ -248,6 +248,10 @@ class SpecObj(datamodel.DataContainer):
                  'ech_frac_was_fit',
                  # spectrograph
                 'spectrograph',
+                # Fiber pypeline flat correction factor (set by
+                # FiberFindObjects._apply_flat_correction, used by
+                # FiberExtract to correct OPT_COUNTS)
+                'flat_corr',
                 ]
 
     def __init__(self, PYPELINE, DET, OBJTYPE='unknown',

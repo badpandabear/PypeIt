@@ -544,7 +544,7 @@ class RawImage:
         if self.par['use_darkimage'] and dark is None:
             raise PypeItError('No dark available for dark subtraction!')
         if self.par['subtract_scattlight'] and scattlight is None \
-                and self.par['scattlight']['method'] not in ['frame', 'archive']:
+                and self.par['scattlight']['method'] not in ['frame', 'archive', 'gaps']:
             raise PypeItError('Scattered light subtraction requested, but scattered light model not provided.')
         if self.par['spat_flexure_correct'] and slits is None:
             raise PypeItError('Spatial flexure correction requested but no slits provided.')
@@ -1281,6 +1281,12 @@ class RawImage:
                         arx_modpar, _ = self.spectrograph.scattered_light_archive(binning, dispname)
                         arx_modpar[8] = 0.0
                         scatt_img = scattlight.scattered_light_model(arx_modpar, _img)
+            elif self.par["scattlight"]["method"] == "gaps":
+                # Measure scattered light in inter-slit gaps and interpolate.
+                # Requires spectrograph to implement subtract_scattered_light_gaps().
+                offslitmask = slits.slit_img(flexure=None) == -1
+                scatt_img = self.spectrograph.subtract_scattered_light_gaps(
+                    self.image[ii, ...], offslitmask)
             else:
                 log.warning("Scattered light not performed")
                 scatt_img = np.zeros(self.image[ii, ...].shape)
