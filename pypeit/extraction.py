@@ -974,12 +974,11 @@ class FiberExtract(Extract):
         Extract fiber spectra from block-slits without local sky subtraction.
 
         For each block-slit, performs Horne (1986) optimal extraction for every
-        fiber SpecObj using flat-derived empirical profiles. The 2D global sky
-        model from ``joint_skysub`` is subtracted at the pixel level before
-        extraction.  Boxcar extraction is skipped for fibers whose
-        ``BOX_COUNTS`` attribute is already populated by
-        :class:`~pypeit.find_objects.FiberFindObjects`.  A flat + illumination
-        correction is applied post-extraction for throughput equalization.
+        fiber SpecObj using flat-derived empirical profiles. The global sky model
+        is used directly (no local sky subtraction). Boxcar extraction is skipped
+        for fibers whose ``BOX_COUNTS`` attribute is already populated (e.g., by
+        :class:`~pypeit.find_objects.FiberFindObjects`), which performs boxcar
+        extraction and 1D sky subtraction as part of object finding.
 
         Parameters
         ----------
@@ -1026,10 +1025,21 @@ class FiberExtract(Extract):
 
         # Science image minus sky
         inmask = self.sciImg.select_flag(invert=True)
-        imgminsky = self.sciImg.image - global_sky
-        # Extract sky to use for BOX_COUNTS_SKY (use bkg_redux if available)
-        extract_sky = global_sky if bkg_redux_global_sky is None \
-            else bkg_redux_global_sky
+
+        # For the Fiber pypeline, the 2D global_sky is only an approximate
+        # diagnostic reconstruction (the real sky subtraction happens in 1D
+        # on extracted spectra in FiberFindObjects._fiber_skysub).  Using it
+        # for extraction would corrupt the results.  Instead, use a zero sky
+        # so that extract_boxcar/extract_optimal work on the raw image and
+        # the 1D sky subtraction from FindObjects is preserved.
+        if self.spectrograph.pypeline == 'Fiber':
+            imgminsky = self.sciImg.image.copy()
+            extract_sky = np.zeros_like(self.sciImg.image)
+        else:
+            imgminsky = self.sciImg.image - global_sky
+            # Extract sky to use for BOX_COUNTS_SKY (use bkg_redux if available)
+            extract_sky = global_sky if bkg_redux_global_sky is None \
+                else bkg_redux_global_sky
 
         # Build empirical 2D profiles for all fibers from flat field
         empirical_profiles = None
@@ -1071,21 +1081,27 @@ class FiberExtract(Extract):
                 self._optimal_extract_fiber(
                     sobj, slitid_img, inmask, global_sky, None)
 
-        # For Fiber pypeline: optimal extraction was done on the 2D
-        # sky-subtracted image, so OPT_COUNTS already has sky removed.
-        # Apply the flat + illumination correction for throughput
-        # equalization (stored by FiberFindObjects._apply_flat_correction).
+        # For Fiber pypeline: optimal extraction was done on the raw image
+        # (no 2D sky subtraction).  Apply the same 1D flat correction and
+        # sky subtraction that was applied to BOX_COUNTS.
         if self.spectrograph.pypeline == 'Fiber':
             n_opt = 0
             for sobj in self.sobjs:
                 if sobj.OPT_COUNTS is None:
                     continue
+                # Apply flat + illumination correction stored during
+                # FiberFindObjects._apply_flat_correction
                 corr = getattr(sobj, 'flat_corr', None)
                 if corr is not None:
                     sobj.OPT_COUNTS = sobj.OPT_COUNTS / corr
                     sobj.OPT_COUNTS_IVAR = sobj.OPT_COUNTS_IVAR * corr**2
+                # Subtract the same 1D sky model used for BOX_COUNTS
+                if sobj.BOX_COUNTS_SKY is not None:
+                    sobj.OPT_COUNTS_SKY = sobj.BOX_COUNTS_SKY.copy()
+                    sobj.OPT_COUNTS = sobj.OPT_COUNTS - sobj.BOX_COUNTS_SKY
                 n_opt += 1
-            log.info(f"Applied flat correction to {n_opt} optimal extractions")
+            log.info(f"Applied 1D flat+sky correction to "
+                     f"{n_opt} optimal extractions")
 
         # Throughput corrections for the Fiber pypeline are handled by
         # normflat + fiber_illumination in FiberFindObjects; skip here.

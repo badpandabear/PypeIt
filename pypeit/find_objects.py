@@ -1337,14 +1337,11 @@ class FiberFindObjects(SlicerIFUFindObjects):
     fiber within each block-slit, using reference fiber positions from
     the spectrograph.
 
-    Sky subtraction uses the inherited
-    :meth:`~pypeit.find_objects.SlicerIFUFindObjects.joint_skysub` to
-    fit a 2D B-spline sky model to dedicated sky fiber pixels and subtract
-    at the pixel level before extraction.  This avoids wavelength-averaging
-    artifacts that arise from fitting sky on boxcar-extracted 1D spectra
-    (the ``BOX_WAVE`` averaging problem).  Post-extraction, the normalized
-    flat and fiber illumination correction are applied for throughput
-    equalization.
+    Follows the IDL Binospec pipeline approach (Chilingarian et al. 2025,
+    Section 6) for sky subtraction: extract all fibers, divide by the
+    globally-normalized flat and fiber illumination correction, then fit
+    a 2D B-spline sky model (wavelength + spatial Legendre polynomial)
+    to the dedicated sky fibers and subtract from all fibers.
 
     See parent doc string for Args and Attributes.
     """
@@ -1353,18 +1350,20 @@ class FiberFindObjects(SlicerIFUFindObjects):
 
     def run(self, std_trace=None, show_peaks=False, show_skysub_fit=False):
         """
-        Primary code flow for fiber object finding with 2D sky subtraction.
+        Primary code flow for fiber object finding with 1D sky subtraction.
 
         For fiber spectrographs, each fiber IS the object -- no peak-detection
-        is needed.  Sky subtraction uses the inherited
-        :meth:`~pypeit.find_objects.SlicerIFUFindObjects.joint_skysub` to
-        build a 2D B-spline sky model from dedicated sky fibers and subtract
-        it at the pixel level before extraction.  This avoids the wavelength-
-        averaging artifacts that arise from fitting/subtracting sky on
-        boxcar-extracted 1D spectra.
+        is needed.  Sky subtraction follows the IDL Binospec pipeline:
 
-        Post-extraction, the normalized flat and fiber illumination correction
-        are applied to equalize fiber throughputs.
+        1. Build wavelength image (if not already available).
+        2. Load ``FiberFlatImages`` calibration products.
+        3. Create one ``SpecObj`` per fiber via ``find_objects_pypeline``.
+        4. Boxcar-extract every fiber from the un-subtracted 2D image.
+        5. Divide by normalized flat and fiber illumination correction.
+        6. Fit a 2D B-spline sky model (wavelength + spatial polynomial)
+           to the dedicated sky fibers.
+        7. Subtract the sky model from all fibers in 1D.
+        8. Reconstruct a diagnostic 2D sky image.
 
         Parameters
         ----------
@@ -1373,12 +1372,12 @@ class FiberFindObjects(SlicerIFUFindObjects):
         show_peaks : :obj:`bool`, optional
             Ignored for fiber reductions.
         show_skysub_fit : :obj:`bool`, optional
-            Show the sky subtraction fit.
+            Ignored for fiber reductions.
 
         Returns
         -------
         initial_sky : `numpy.ndarray`_
-            2D sky model from ``joint_skysub``.
+            Reconstructed 2D sky model (diagnostic; actual subtraction is 1D).
         sobjs_obj : :class:`~pypeit.specobjs.SpecObjs`
             List of objects found (one per fiber), with sky-subtracted
             ``BOX_COUNTS`` and ``BOX_COUNTS_SKY`` populated.
@@ -1393,49 +1392,41 @@ class FiberFindObjects(SlicerIFUFindObjects):
             self.waveimg = self.wv_calib.build_waveimg(
                 self.tilts, self.slits, spat_flexure=self.spat_flexure_shift)
 
-        # 2. Load fiber flat products (for post-extraction equalization)
+        # 2. Load fiber flat products
         fiber_flatimages = self._load_fiber_flatimages()
 
-        # 3. 2D sky subtraction via joint_skysub
-        #    This fits a 2D B-spline to dedicated sky fiber pixels (using
-        #    the sky-fiber mask from the spectrograph), applies iterative
-        #    illumination correction, and returns a pixel-level sky model.
-        #    It also modifies self.sciImg via apply_relative_scale for
-        #    illumination and skyline corrections.
-        self.reduce_bpm = self.reduce_bpm_init.copy()
-        initial_sky = self.joint_skysub(show_fit=show_skysub_fit)
-
-        # 4. Find objects (one SpecObj per fiber) on sky-subtracted image
+        # 3. Create SpecObjs for all fibers (reuse find_objects_pypeline)
         self.reduce_bpm = self.reduce_bpm_init.copy()
         sobjs_obj, self.nobj = self.find_objects(
-            self.sciImg.image - initial_sky, self.sciImg.ivar,
+            self.sciImg.image, self.sciImg.ivar,
             std_trace=std_trace, show=self.findobj_show,
             show_peaks=show_peaks)
 
         if len(sobjs_obj) == 0:
-            return initial_sky, sobjs_obj
+            return np.zeros_like(self.sciImg.image), sobjs_obj
 
-        # 5. Boxcar extract from sky-subtracted image
+        # 4. Boxcar extract all fibers from the un-subtracted image
         gpm = self.sciImg.select_flag(invert=True)
         slitmask = self.slits.slit_img(initial=True)
-        imgminsky = self.sciImg.image - initial_sky
+        zero_sky = np.zeros_like(self.sciImg.image)
 
         for sobj in sobjs_obj:
             thismask = slitmask == sobj.SLITID
             inmask = gpm & thismask
+            # extract_boxcar expects imgminsky; pass raw image with skyimg=0
             wave, flux, flux_ivar, flux_sig, flux_nivar, box_gpm, \
                 fwhm, flat_spec, sky, base, npix = extract.extract_boxcar(
                     sobj.BOX_R_PIX, sobj.TRACE_SPAT,
-                    imgminsky, self.sciImg.ivar,
-                    inmask, self.waveimg, initial_sky)
+                    self.sciImg.image, self.sciImg.ivar,
+                    inmask, self.waveimg, zero_sky)
             sobj.BOX_WAVE = wave
             sobj.BOX_COUNTS = flux
             sobj.BOX_COUNTS_IVAR = flux_ivar
             sobj.BOX_COUNTS_SKY = sky
             sobj.BOX_MASK = box_gpm
 
-        # 6. Apply flat correction for throughput equalization
-        self._apply_flat_correction(sobjs_obj, fiber_flatimages)
+        # 5. Equalize and subtract sky in 1D
+        initial_sky = self._fiber_skysub(sobjs_obj, fiber_flatimages)
 
         return initial_sky, sobjs_obj
 
@@ -1557,6 +1548,161 @@ class FiberFindObjects(SlicerIFUFindObjects):
 
         log.info(f"Applied flat + illumination correction to "
                  f"{n_corrected}/{len(sobjs)} fibers")
+
+    def _fiber_skysub(self, sobjs, fiber_flatimages):
+        """
+        Perform 1D sky subtraction following the IDL Binospec pipeline.
+
+        1. Apply normalized flat + fiber illumination correction.
+        2. Fit a 2D B-spline to sky fibers (wavelength + spatial Legendre
+           polynomial along the pseudo-slit).
+        3. Subtract the sky model from all fibers.
+
+        Parameters
+        ----------
+        sobjs : :class:`~pypeit.specobjs.SpecObjs`
+            Spectral objects with populated ``BOX_COUNTS``, ``BOX_WAVE``,
+            ``BOX_COUNTS_IVAR``.
+        fiber_flatimages : :class:`~pypeit.flatfield.FiberFlatImages` or None
+            Fiber flat calibration products.
+
+        Returns
+        -------
+        sky_2d : `numpy.ndarray`_
+            Reconstructed 2D sky image for diagnostics. Shape matches
+            ``self.sciImg.image``.
+        """
+        from pypeit.core.fitting import iterfit
+
+        nspec, nspat = self.sciImg.image.shape
+
+        # Step 1: apply flat field + fiber illumination correction
+        self._apply_flat_correction(sobjs, fiber_flatimages)
+
+        # Step 2: identify sky fibers
+        sky_indices = []
+        for i, sobj in enumerate(sobjs):
+            name = sobj.MASKDEF_OBJNAME
+            if name is not None and str(name).upper().startswith('SKY'):
+                sky_indices.append(i)
+
+        log.info(f"Building sky model from {len(sky_indices)} sky fibers")
+
+        if len(sky_indices) == 0:
+            log.warning("No sky fibers found; returning zero sky model")
+            return np.zeros((nspec, nspat))
+
+        # Use the full wavelength range of the data.  The flat correction
+        # is applied everywhere — even where the flat has low signal, a
+        # noisy correction is better than none.  The Poisson ivar will
+        # naturally downweight low-S/N regions in the B-spline fit.
+        wave_lo, wave_hi = 0.0, np.inf
+
+        # Step 3: build super-sampled sky spectrum with spatial coordinate
+        # Get detector gain and read noise for Poisson weights
+        gain = float(np.mean(self.sciImg.detector['gain']))
+        rdnoise = float(np.mean(self.sciImg.detector['ronoise']))
+
+        all_wave, all_flux, all_ivar, all_x2 = [], [], [], []
+        for idx in sky_indices:
+            sobj = sobjs[idx]
+            if sobj.BOX_COUNTS is None or sobj.BOX_WAVE is None:
+                continue
+            good = ((sobj.BOX_WAVE > 0)
+                    & np.isfinite(sobj.BOX_COUNTS)
+                    & (sobj.BOX_WAVE >= wave_lo)
+                    & (sobj.BOX_WAVE <= wave_hi))
+            if sobj.BOX_MASK is not None:
+                good &= sobj.BOX_MASK
+            if not np.any(good):
+                continue
+
+            # Poisson inverse-variance weights (IDL formula)
+            raw_counts = np.abs(sobj.BOX_COUNTS[good])
+            poisson_ivar = gain**2 / (gain * raw_counts + rdnoise**2)
+
+            # Spatial coordinate: normalized pixel position [0, 1]
+            spat_pos = sobj.SPAT_PIXPOS / nspat
+
+            all_wave.append(sobj.BOX_WAVE[good])
+            all_flux.append(sobj.BOX_COUNTS[good])
+            all_ivar.append(poisson_ivar)
+            all_x2.append(np.full(np.sum(good), spat_pos))
+
+        if len(all_wave) == 0:
+            log.warning("No valid sky fiber data; returning zero sky model")
+            return np.zeros((nspec, nspat))
+
+        all_wave = np.concatenate(all_wave)
+        all_flux = np.concatenate(all_flux)
+        all_ivar = np.concatenate(all_ivar)
+        all_x2 = np.concatenate(all_x2)
+
+        # Sort by wavelength (required by bspline)
+        srt = np.argsort(all_wave)
+        all_wave = all_wave[srt]
+        all_flux = all_flux[srt]
+        all_ivar = all_ivar[srt]
+        all_x2 = all_x2[srt]
+
+        # Step 4: fit 2D B-spline (wavelength + spatial Legendre polynomial)
+        bsp = self.par['reduce']['skysub']['bspline_spacing']
+        if bsp is None:
+            bsp = 1.2
+
+        # npoly=2: constant + linear Legendre terms along pseudo-slit
+        # (matches IDL pipeline skydegy=2 for IFU mode)
+        npoly = 2
+
+        log.info(f"B-spline sky fit: {len(all_wave)} pixels, "
+                 f"bkspace={bsp}, npoly={npoly}")
+
+        try:
+            sset, outmask = iterfit(
+                all_wave, all_flux, invvar=all_ivar,
+                x2=all_x2,
+                upper=3, lower=3, maxiter=10,
+                nord=4,
+                kwargs_bspline={'bkspace': bsp, 'npoly': npoly})
+        except Exception as e:
+            log.warning(f"Sky B-spline fit failed: {e}")
+            return np.zeros((nspec, nspat))
+
+        n_rej = np.sum(~outmask)
+        log.info(f"Sky model: {n_rej}/{len(outmask)} pixels rejected "
+                 f"({100*n_rej/len(outmask):.1f}%)")
+
+        # Wavelength range of the fit data (for clipping extrapolation)
+        wave_min = all_wave[0]
+        wave_max = all_wave[-1]
+
+        # Step 5: subtract sky from ALL fibers
+        for sobj in sobjs:
+            if sobj.BOX_WAVE is None or sobj.BOX_COUNTS is None:
+                continue
+            # Only evaluate sky model within the B-spline fit range
+            in_range = ((sobj.BOX_WAVE >= wave_min)
+                        & (sobj.BOX_WAVE <= wave_max))
+            sky_spec = np.zeros_like(sobj.BOX_COUNTS)
+            if np.any(in_range):
+                spat_pos = sobj.SPAT_PIXPOS / nspat
+                x2_fiber = np.full(np.sum(in_range), spat_pos)
+                sky_spec[in_range], _ = sset.value(
+                    sobj.BOX_WAVE[in_range], x2=x2_fiber)
+
+            sobj.BOX_COUNTS_SKY = sky_spec.copy()
+            sobj.BOX_COUNTS = sobj.BOX_COUNTS - sky_spec
+
+        # Reconstruct 2D sky image for diagnostics
+        sky_2d = np.zeros((nspec, nspat))
+        valid = (self.waveimg >= wave_min) & (self.waveimg <= wave_max)
+        if np.any(valid):
+            # Use midpoint spatial position for the 2D reconstruction
+            mid_spat = 0.5
+            x2_2d = np.full(np.sum(valid), mid_spat)
+            sky_2d[valid], _ = sset.value(self.waveimg[valid], x2=x2_2d)
+
+        return sky_2d
 
     def find_objects_pypeline(self, image, ivar, std_trace=None,
                               manual_extract_dict=None,
