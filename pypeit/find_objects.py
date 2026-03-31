@@ -1350,20 +1350,18 @@ class FiberFindObjects(SlicerIFUFindObjects):
 
     def run(self, std_trace=None, show_peaks=False, show_skysub_fit=False):
         """
-        Primary code flow for fiber object finding with 1D sky subtraction.
+        Primary code flow for fiber object finding with 2D sky subtraction.
 
         For fiber spectrographs, each fiber IS the object -- no peak-detection
-        is needed.  Sky subtraction follows the IDL Binospec pipeline:
+        is needed.  Sky subtraction uses the inherited
+        :meth:`~pypeit.find_objects.SlicerIFUFindObjects.joint_skysub` to
+        build a 2D B-spline sky model from dedicated sky fibers and subtract
+        it at the pixel level before extraction.  This avoids the wavelength-
+        averaging artifacts that arise from fitting/subtracting sky on
+        boxcar-extracted 1D spectra.
 
-        1. Build wavelength image (if not already available).
-        2. Load ``FiberFlatImages`` calibration products.
-        3. Create one ``SpecObj`` per fiber via ``find_objects_pypeline``.
-        4. Boxcar-extract every fiber from the un-subtracted 2D image.
-        5. Divide by normalized flat and fiber illumination correction.
-        6. Fit a 2D B-spline sky model (wavelength + spatial polynomial)
-           to the dedicated sky fibers.
-        7. Subtract the sky model from all fibers in 1D.
-        8. Reconstruct a diagnostic 2D sky image.
+        Post-extraction, the normalized flat and fiber illumination correction
+        are applied to equalize fiber throughputs.
 
         Parameters
         ----------
@@ -1372,12 +1370,12 @@ class FiberFindObjects(SlicerIFUFindObjects):
         show_peaks : :obj:`bool`, optional
             Ignored for fiber reductions.
         show_skysub_fit : :obj:`bool`, optional
-            Ignored for fiber reductions.
+            Show the sky subtraction fit.
 
         Returns
         -------
         initial_sky : `numpy.ndarray`_
-            Reconstructed 2D sky model (diagnostic; actual subtraction is 1D).
+            2D sky model from ``joint_skysub``.
         sobjs_obj : :class:`~pypeit.specobjs.SpecObjs`
             List of objects found (one per fiber), with sky-subtracted
             ``BOX_COUNTS`` and ``BOX_COUNTS_SKY`` populated.
@@ -1392,41 +1390,49 @@ class FiberFindObjects(SlicerIFUFindObjects):
             self.waveimg = self.wv_calib.build_waveimg(
                 self.tilts, self.slits, spat_flexure=self.spat_flexure_shift)
 
-        # 2. Load fiber flat products
+        # 2. Load fiber flat products (for post-extraction equalization)
         fiber_flatimages = self._load_fiber_flatimages()
 
-        # 3. Create SpecObjs for all fibers (reuse find_objects_pypeline)
+        # 3. 2D sky subtraction via joint_skysub
+        #    This fits a 2D B-spline to dedicated sky fiber pixels (using
+        #    the sky-fiber mask from the spectrograph), applies iterative
+        #    illumination correction, and returns a pixel-level sky model.
+        #    It also modifies self.sciImg via apply_relative_scale for
+        #    illumination and skyline corrections.
+        self.reduce_bpm = self.reduce_bpm_init.copy()
+        initial_sky = self.joint_skysub(show_fit=show_skysub_fit)
+
+        # 4. Find objects (one SpecObj per fiber) on sky-subtracted image
         self.reduce_bpm = self.reduce_bpm_init.copy()
         sobjs_obj, self.nobj = self.find_objects(
-            self.sciImg.image, self.sciImg.ivar,
+            self.sciImg.image - initial_sky, self.sciImg.ivar,
             std_trace=std_trace, show=self.findobj_show,
             show_peaks=show_peaks)
 
         if len(sobjs_obj) == 0:
-            return np.zeros_like(self.sciImg.image), sobjs_obj
+            return initial_sky, sobjs_obj
 
-        # 4. Boxcar extract all fibers from the un-subtracted image
+        # 5. Boxcar extract from sky-subtracted image
         gpm = self.sciImg.select_flag(invert=True)
         slitmask = self.slits.slit_img(initial=True)
-        zero_sky = np.zeros_like(self.sciImg.image)
+        imgminsky = self.sciImg.image - initial_sky
 
         for sobj in sobjs_obj:
             thismask = slitmask == sobj.SLITID
             inmask = gpm & thismask
-            # extract_boxcar expects imgminsky; pass raw image with skyimg=0
             wave, flux, flux_ivar, flux_sig, flux_nivar, box_gpm, \
                 fwhm, flat_spec, sky, base, npix = extract.extract_boxcar(
                     sobj.BOX_R_PIX, sobj.TRACE_SPAT,
-                    self.sciImg.image, self.sciImg.ivar,
-                    inmask, self.waveimg, zero_sky)
+                    imgminsky, self.sciImg.ivar,
+                    inmask, self.waveimg, initial_sky)
             sobj.BOX_WAVE = wave
             sobj.BOX_COUNTS = flux
             sobj.BOX_COUNTS_IVAR = flux_ivar
             sobj.BOX_COUNTS_SKY = sky
             sobj.BOX_MASK = box_gpm
 
-        # 5. Equalize and subtract sky in 1D
-        initial_sky = self._fiber_skysub(sobjs_obj, fiber_flatimages)
+        # 6. Apply flat correction for throughput equalization
+        self._apply_flat_correction(sobjs_obj, fiber_flatimages)
 
         return initial_sky, sobjs_obj
 
