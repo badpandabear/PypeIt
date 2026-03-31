@@ -11,6 +11,7 @@ Documentation Updates
 - Updated the documentation about the use of the mask design file for Gemini/GMOS.
   See the :ref:`gemini_gmos` documentation for details.
 
+- Updated the Setup GUI tutorial to reflect the new look of the GUI.
 
 Dependency Changes
 ------------------
@@ -18,12 +19,14 @@ Dependency Changes
 
 Functionality/Performance Improvements and Additions
 ----------------------------------------------------
-
 - Added a new ``Fiber`` pypeline for fiber-fed spectrographs, where each fiber
   is treated as a distinct object without peak-detection object finding.  The
   pypeline dispatch system (``FiberFindObjects``, ``FiberExtract``) follows the
   existing class-name convention.
 
+- Setup GUI now uses a standard button bar that can be moved.
+- Re-enabled the Cancel button on the Setup GUI progress dialog.
+- Increased default font size for Setup GUI.
 
 Instrument-specific Updates
 ---------------------------
@@ -61,11 +64,11 @@ Instrument-specific Updates
 
 Script Changes
 --------------
-
 - Added ``pypeit_binospec_ifu_cube`` for building datacubes from Binospec IFU
   spec1d or spec2d files.  Accepts both file types, combines both detector
   sides, and produces FITS datacubes with 3-axis WCS.
 
+- Removed -G/--gui option from pypeit_obslog.
 
 Testing
 -------
@@ -83,6 +86,12 @@ Under-the-hood Improvements
 - Separated previous functions in :mod:`~pypeit.core.extract` that have to do
   with modeling the spatial profile of the object into a new module,
   :mod:`~pypeit.core.spatialprofile`.
+- Restructure modules used to construct globals for an instance of PypeIt (e.g.,
+  ``log`` and ``dataPaths``) into a new ``pkg`` module.  This isolates these
+  operations from the rest of PypeIt.
+- Refactor how script and spectrograph classes are imported.  Instead of
+  importing each module in the relevant ``__init__.py`` file, we now define
+  ``__all__`` and import all the relevant classes where needed.
 
 Bug Fixes
 ---------
