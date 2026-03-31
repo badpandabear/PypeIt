@@ -974,11 +974,12 @@ class FiberExtract(Extract):
         Extract fiber spectra from block-slits without local sky subtraction.
 
         For each block-slit, performs Horne (1986) optimal extraction for every
-        fiber SpecObj using flat-derived empirical profiles. The global sky model
-        is used directly (no local sky subtraction). Boxcar extraction is skipped
-        for fibers whose ``BOX_COUNTS`` attribute is already populated (e.g., by
-        :class:`~pypeit.find_objects.FiberFindObjects`), which performs boxcar
-        extraction and 1D sky subtraction as part of object finding.
+        fiber SpecObj using flat-derived empirical profiles. The 2D global sky
+        model from ``joint_skysub`` is subtracted at the pixel level before
+        extraction.  Boxcar extraction is skipped for fibers whose
+        ``BOX_COUNTS`` attribute is already populated by
+        :class:`~pypeit.find_objects.FiberFindObjects`.  A flat + illumination
+        correction is applied post-extraction for throughput equalization.
 
         Parameters
         ----------

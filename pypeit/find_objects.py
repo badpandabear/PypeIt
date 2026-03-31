@@ -1337,11 +1337,14 @@ class FiberFindObjects(SlicerIFUFindObjects):
     fiber within each block-slit, using reference fiber positions from
     the spectrograph.
 
-    Follows the IDL Binospec pipeline approach (Chilingarian et al. 2025,
-    Section 6) for sky subtraction: extract all fibers, divide by the
-    globally-normalized flat and fiber illumination correction, then fit
-    a 2D B-spline sky model (wavelength + spatial Legendre polynomial)
-    to the dedicated sky fibers and subtract from all fibers.
+    Sky subtraction uses the inherited
+    :meth:`~pypeit.find_objects.SlicerIFUFindObjects.joint_skysub` to
+    fit a 2D B-spline sky model to dedicated sky fiber pixels and subtract
+    at the pixel level before extraction.  This avoids wavelength-averaging
+    artifacts that arise from fitting sky on boxcar-extracted 1D spectra
+    (the ``BOX_WAVE`` averaging problem).  Post-extraction, the normalized
+    flat and fiber illumination correction are applied for throughput
+    equalization.
 
     See parent doc string for Args and Attributes.
     """
