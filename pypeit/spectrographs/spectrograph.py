@@ -873,6 +873,30 @@ class Spectrograph:
         """
         return None
 
+    def get_arc_extract_center(self, slitcen, slits, det):
+        """
+        Return adjusted slit centers for arc spectrum extraction.
+
+        For most spectrographs, the arc is extracted at the geometric center
+        of each slit.  Fiber-fed spectrographs may override this to place
+        the extraction center on a fiber rather than in an inter-fiber gap.
+
+        Parameters
+        ----------
+        slitcen : `numpy.ndarray`_
+            Slit center traces, shape ``(nspec, nslits)``.
+        slits : :class:`~pypeit.slittrace.SlitTraceSet`
+            Slit traces.
+        det : :obj:`int`
+            1-indexed detector number.
+
+        Returns
+        -------
+        `numpy.ndarray`_
+            Adjusted slit center traces, same shape as ``slitcen``.
+        """
+        return slitcen
+
     @staticmethod
     def maskdef_spec_minmax(maskfile=None, maskdef_ids=None, nspec=None, shift=150):
         """

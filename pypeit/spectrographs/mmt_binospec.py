@@ -1667,6 +1667,58 @@ class MMTBINOSPECIFUSpectrograph(MMTBINOSPECSpectrograph):
 
         return left_edges, right_edges
 
+    def get_arc_extract_center(self, slitcen, slits, det):
+        """
+        Snap arc extraction center to the nearest fiber in each block.
+
+        The default ``slitcen`` is the midpoint of the block-slit edges,
+        which may fall in an inter-fiber gap.  A gap-centered extraction
+        with the default 3-pixel boxcar yields a noisy arc spectrum that
+        degrades the wavelength solution for all fibers in the block.
+
+        This method shifts each block's extraction center to the reference
+        fiber position closest to the geometric center.
+
+        Parameters
+        ----------
+        slitcen : `numpy.ndarray`_
+            Slit center traces, shape ``(nspec, nslits)``.
+        slits : :class:`~pypeit.slittrace.SlitTraceSet`
+            Slit traces.
+        det : :obj:`int`
+            1-indexed detector number.
+
+        Returns
+        -------
+        `numpy.ndarray`_
+            Adjusted slit center traces, same shape as ``slitcen``.
+        """
+        blocks = self.get_fiber_blocks(det)
+        nslits = slitcen.shape[1]
+        if len(blocks) != nslits:
+            log.warning(f"Block count ({len(blocks)}) != slit count "
+                        f"({nslits}); skipping arc center adjustment")
+            return slitcen
+
+        # Bulk shift between reference profile and detected slit positions
+        mid = slitcen.shape[0] // 2
+        slit_centers_mid = slitcen[mid, :]
+        ref_centers = np.array([0.5 * (b['min_pix'] + b['max_pix'])
+                                for b in blocks])
+        shift = np.median(slit_centers_mid - ref_centers)
+
+        adjusted = slitcen.copy()
+        for i, block in enumerate(blocks):
+            fiber_pos = block['fiber_positions'] + shift
+            center = slit_centers_mid[i]
+            nearest_idx = np.argmin(np.abs(fiber_pos - center))
+            offset = fiber_pos[nearest_idx] - center
+            adjusted[:, i] += offset
+            log.info(f"Block {block['block_id']}: arc extract center "
+                     f"shifted {offset:+.1f} px to nearest fiber")
+
+        return adjusted
+
     def adjust_slit_edges_to_fibers(self, slits, det):
         """
         Shrink slit edges to tightly wrap fiber positions from the reference
