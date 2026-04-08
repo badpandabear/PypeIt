@@ -484,8 +484,8 @@ regular spatial grid.
 
 - **PypeIt** (``pypeit/scripts/binospec_ifu_cube.py``): Combines both
   detectors (640 science fibers total, 320 per side) using fiber sky
-  positions from the IFU layout file.  Supports input from either
-  spec1d or spec2d files.  Full ``ivar`` propagation through the
+  positions from the IFU layout file.  Reads already-extracted fiber
+  spectra from spec1d files.  Full ``ivar`` propagation through the
   cube-building process
 - **IDL pipeline** (``bino_ifu_cube.pro``): Similar fiber-to-sky
   mapping.  Errors estimated at cube-building time using a Poisson +

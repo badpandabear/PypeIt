@@ -65,8 +65,8 @@ Instrument-specific Updates
 Script Changes
 --------------
 - Added ``pypeit_binospec_ifu_cube`` for building datacubes from Binospec IFU
-  spec1d or spec2d files.  Accepts both file types, combines both detector
-  sides, and produces FITS datacubes with 3-axis WCS.
+  spec1d files.  Combines both detector sides and produces FITS datacubes
+  with 3-axis WCS.
 
 - Removed -G/--gui option from pypeit_obslog.
 

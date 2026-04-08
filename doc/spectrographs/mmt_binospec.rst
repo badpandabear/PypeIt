@@ -121,30 +121,18 @@ Producing datacubes
 Because the Binospec IFU is fiber-fed rather than slicer-based, the
 general-purpose ``pypeit_coadd_datacube`` script (designed for slicer
 IFUs like KCWI) does not produce correct results.  Instead, use the
-dedicated ``pypeit_binospec_ifu_cube`` script, which accepts either
-spec1d or spec2d files and builds a datacube from the fiber spectra.
+dedicated ``pypeit_binospec_ifu_cube`` script that reads
+extracted 1D fiber spectra from spec1d files and
+builds a datacube.
 
-**From spec1d files (recommended):**
-
-The script reads the already-extracted 1D spectra from the pipeline's
-spec1d output.  By default, optimal (``OPT``) extraction is used; pass
-``--boxcar`` to use boxcar (``BOX``) extraction instead.  Sky
+By default, optimal (``OPT``) extraction columns are used; pass
+``--boxcar`` to use boxcar (``BOX``) extraction columns instead.  Sky
 subtraction is already applied by the pipeline, so no additional sky
 subtraction is performed.
 
-**From spec2d files:**
+The script then:
 
-The script extracts fiber spectra directly from the 2D spectral images
-using optimal (Horne 1986) extraction with an empirical spatial profile
-from the flat field (default), a Gaussian profile (``--gaussian``), or
-boxcar summation (``--boxcar``).  Sky is subtracted using PypeIt's
-per-fiber B-spline sky model (default), or optionally using the
-dedicated sky fibers (``--use_fibers``).
-
-**Shared steps (both inputs):**
-
-1. Identifies sky vs. science fibers via cross-correlation against a
-   reference profile
+1. Identifies sky vs. science fibers from fiber metadata
 2. Resamples all fiber spectra onto a common linear wavelength grid
 3. Combines both detectors (up to 640 science fibers total)
 4. Maps each fiber to its on-sky position using the IFU layout
@@ -169,20 +157,13 @@ dedicated sky fibers (``--use_fibers``).
 Basic usage
 ^^^^^^^^^^^
 
-To build datacubes from spec1d files (recommended):
+To build datacubes from spec1d files:
 
 .. code-block:: bash
 
    pypeit_binospec_ifu_cube spec1d_*.fits
 
-To build datacubes from spec2d files:
-
-.. code-block:: bash
-
-   pypeit_binospec_ifu_cube spec2d_*.fits
-
-All input files must be the same type (spec1d or spec2d); mixing is not
-allowed.  Each input file produces a separate output datacube named
+Each input file produces a separate output datacube named
 ``cube_sci_img_*.fits``.  Each cube combines both detectors and
 contains ``FLUX`` and ``VAR`` extensions.
 
@@ -192,7 +173,6 @@ Command-line options
 .. code-block:: bash
 
    pypeit_binospec_ifu_cube spec1d_*.fits [options]
-   pypeit_binospec_ifu_cube spec2d_*.fits [options]
 
 ``--output FILENAME``
    Output FITS filename.  Only valid when processing a single input
@@ -203,29 +183,9 @@ Command-line options
    Output spatial pixel scale in arcsec.  Default is 0.27, which
    matches the IDL pipeline (``scl = 0.269461``).
 
-``--no_skysub``
-   Skip sky subtraction entirely (spec2d only; ignored for spec1d
-   since sky is already subtracted by the pipeline).
-
-``--use_fibers``
-   Use the 40 dedicated sky fibers per side to compute a
-   sigma-clipped mean sky spectrum for subtraction (matching the IDL
-   pipeline approach).  By default, the script uses PypeIt's
-   per-fiber B-spline sky model from the spec2d file.  This option
-   is only relevant for spec2d input; it is ignored for spec1d.
-
 ``--boxcar``
-   For spec1d input: use boxcar (``BOX``) extraction columns instead
-   of the default optimal (``OPT``) columns.  For spec2d input: use
-   boxcar (unweighted sum) extraction instead of the default optimal
-   (Horne 1986) profile-weighted extraction.
-
-``--gaussian``
-   Use a Gaussian spatial profile for optimal extraction instead of
-   the default empirical profile measured from the flat field (spec2d
-   only).  The Gaussian width is derived from the slit edge traces.
-   This is also the automatic fallback if the flat field calibration
-   file cannot be loaded.
+   Use boxcar (``BOX``) extraction columns from the spec1d file
+   instead of the default optimal (``OPT``) columns.
 
 ``--method METHOD``
    Spatial interpolation method: ``nearest``, ``linear`` (default), or
